@@ -600,6 +600,10 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
                 if source and model_source(mdl) != source:
                     continue
                 month_cost += e["cost"]
+    by_tool = {}
+    for mdl, e in by_model.items():
+        _acc(by_tool, model_source(mdl), e)
+    by_tool = dict(sorted(by_tool.items(), key=lambda kv: kv[1]["cost"], reverse=True))
     return {
         "generated_at": now.isoformat(timespec="seconds"),
         "filter": {"project": project or "", "model": model or "",
@@ -608,6 +612,7 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
         "window": total,
         "daily": daily,
         "by_model": by_model,
+        "by_tool": by_tool,
         "by_project": dict(sorted(by_project.items(),
                                   key=lambda kv: kv[1]["cost"], reverse=True)[:20]),
         "cache_hit_rate": (total["cr"] / cache_denom) if cache_denom else 0.0,

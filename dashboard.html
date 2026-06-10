@@ -229,6 +229,10 @@
     <table id="t-models"><thead>
       <tr><th>model</th><th class="num">out tok</th><th class="num">cost</th></tr>
     </thead><tbody></tbody></table>
+    <h2 style="margin-top:16px">By tool · <span class="win">last 30d</span></h2>
+    <table id="t-tools"><thead>
+      <tr><th>tool</th><th class="num">out tok</th><th class="num">cost</th></tr>
+    </thead><tbody></tbody></table>
   </div>
 </div>
 
@@ -419,6 +423,12 @@ function render(s) {
   mt.innerHTML = models.map(mdl =>
     `<tr><td>${esc(shortModel(mdl))}</td><td class="num">${tok(s.by_model[mdl].out)}</td>` +
     `<td class="num">${usd(s.by_model[mdl].cost)}</td></tr>`).join('');
+
+  const tt = $('t-tools').querySelector('tbody');
+  tt.innerHTML = Object.entries(s.by_tool || {}).map(([tool, e]) =>
+    `<tr><td>${esc(TOOL_NAMES[tool] || tool)}</td><td class="num">${tok(e.out)}</td>` +
+    `<td class="num">${usd(e.cost)}</td></tr>`).join('') ||
+    '<tr><td class="muted" colspan="3">no data</td></tr>';
 
   const ll = $('live-list');
   ll.innerHTML = s.live_sessions.length

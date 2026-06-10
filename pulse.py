@@ -125,14 +125,14 @@ _lock = threading.RLock()  # RLock allows recursive re-entry (refresh_index forc
 
 def _empty_index():
     # days is day -> project -> model -> entry (enables any filter combination)
-    return {"version": 2, "files": {}, "days": {}, "activity": {}, "recent": []}
+    return {"version": 3, "files": {}, "days": {}, "activity": {}, "recent": []}
 
 
 def _load_index():
     try:
         with open(INDEX_FILE) as f:
             idx = json.load(f)
-        if idx.get("version") == 2:
+        if idx.get("version") == 3:
             return idx
     except (OSError, ValueError):
         pass
@@ -382,8 +382,6 @@ def refresh_index(force=False):
                 return refresh_index(force=True)
             offset = rec.get("offset", 0) if rec else 0
             state = (rec.get("state") if rec else None) or {}
-            if rec and rec.get("key") and "key" not in state:
-                state["key"] = rec["key"]  # migrate v2 claude cursor
             try:
                 if kind == "claude":
                     offset, state = _scan_claude(path, offset, state, idx)

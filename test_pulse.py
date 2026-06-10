@@ -82,6 +82,40 @@ class TestProjectName(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 0c. _load_index — version bump triggers full rebuild (no stale key bleed)
+# ---------------------------------------------------------------------------
+
+class TestLoadIndexVersionBump(unittest.TestCase):
+    def test_old_version_returns_empty_index(self):
+        """A v2 index on disk must be discarded so stale project keys are rebuilt."""
+        with tempfile.TemporaryDirectory() as d:
+            idx_path = Path(d) / "index.json"
+            # Write a plausible v2 index with stale unstripped keys.
+            stale = {"version": 2, "files": {}, "days": {"2026-01-01": {
+                "-Users-tumz-workspace-rtk": {"old-model": {"in": 1, "out": 1, "n": 1}}
+            }}, "activity": {}, "recent": []}
+            idx_path.write_text(json.dumps(stale))
+            with patch("pulse.INDEX_FILE", idx_path):
+                loaded = pulse._load_index()
+            self.assertEqual(loaded["version"], 3,
+                             "_load_index should return a fresh v3 index for a v2 file")
+            self.assertEqual(loaded["days"], {},
+                             "stale days from v2 index must not bleed into the fresh index")
+
+    def test_current_version_loads_as_is(self):
+        """A v3 index on disk is loaded without rebuild."""
+        with tempfile.TemporaryDirectory() as d:
+            idx_path = Path(d) / "index.json"
+            v3 = {"version": 3, "files": {}, "days": {"2026-01-01": {"proj": {}}},
+                  "activity": {}, "recent": []}
+            idx_path.write_text(json.dumps(v3))
+            with patch("pulse.INDEX_FILE", idx_path):
+                loaded = pulse._load_index()
+            self.assertEqual(loaded["version"], 3)
+            self.assertIn("2026-01-01", loaded["days"])
+
+
+# ---------------------------------------------------------------------------
 # 0b. rtk_gain() cache — None-result path doesn't re-spawn every SSE refresh
 # ---------------------------------------------------------------------------
 

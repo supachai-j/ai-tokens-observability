@@ -73,15 +73,15 @@ without any index change. The Claude Code adapter specifics:
 - Handles partial trailing lines (a session mid-write) by re-reading them on
   the next pass, and triggers a full rebuild if a file ever shrinks.
 
-### 2. The index (`~/.config/rtk-pulse/index.json`, version 2)
+### 2. The index (`~/.config/rtk-pulse/index.json`, version 3)
 
 A single JSON document, written atomically (tmp + rename), guarded by a
 process-wide lock:
 
 ```
 {
-  "version": 2,
-  "files":    { path: {size, mtime, offset, key} },          // scan cursors
+  "version": 3,
+  "files":    { path: {size, mtime, offset, state} },        // scan cursors
   "days":     { "YYYY-MM-DD": { project: { model: entry }}}, // aggregates
   "activity": { project: {ts, model, session} },             // last-seen
   "recent":   [ [ts, project, model, in, out, cache, cost] ] // ring buffer
@@ -98,8 +98,11 @@ process-wide lock:
   feed and tokens-per-minute chart.
 - Days older than `KEEP_DAYS` (90) are pruned; long-term history lives in
   `history.jsonl` snapshots instead.
-- A version bump (schema change) silently discards the old index and
-  rebuilds — acceptable because rebuilds are sub-second.
+- A version bump (schema change **or** key-derivation change) silently
+  discards the old index and rebuilds — acceptable because rebuilds are
+  sub-second. v2 → v3 was triggered by the `_project_name` change to
+  `HOME_PREFIX`, which altered project-name keys and would otherwise
+  cause split/double-counted buckets in existing indexes.
 
 ### 3. Aggregator (`_agg`, `build_summary`)
 

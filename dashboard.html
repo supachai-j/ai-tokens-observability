@@ -319,7 +319,7 @@ const TOOL_NAMES = { claude: 'Claude Code', codex: 'Codex CLI', gemini: 'Gemini 
 function fillSelect(sel, items, current, fmt) {
   if (sel.options.length === items.length + 1 && sel.value === current) return;
   sel.innerHTML = '<option value="">all</option>' + items.map(x =>
-    `<option value="${x}">${(fmt || (v => v))(x)}</option>`).join('');
+    `<option value="${esc(x)}">${esc((fmt || (v => v))(x))}</option>`).join('');
   sel.value = items.includes(current) ? current : '';
 }
 
@@ -369,7 +369,7 @@ function render(s) {
     ? s.feed.map(e => {
         const hhmm = new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const prj = e.project.length > 22 ? '…' + e.project.slice(-21) : e.project;
-        return `<tr><td>${hhmm}</td><td title="${e.project} · ${shortModel(e.model)}">${prj}</td>` +
+        return `<tr><td>${hhmm}</td><td title="${esc(e.project)} · ${esc(shortModel(e.model))}">${esc(prj)}</td>` +
                `<td class="num">${tok(e.out)}</td><td class="num">${usd3(e.cost)}</td></tr>`;
       }).join('')
     : '<tr><td class="muted" colspan="4">no activity in the last hour</td></tr>';
@@ -392,22 +392,22 @@ function render(s) {
 
   const pt = $('t-projects').querySelector('tbody');
   pt.innerHTML = Object.entries(s.by_project).slice(0, 12).map(([p, e]) =>
-    `<tr><td title="${p}">${p.length > 34 ? '…' + p.slice(-33) : p}</td>` +
+    `<tr><td title="${esc(p)}">${esc(p.length > 34 ? '…' + p.slice(-33) : p)}</td>` +
     `<td class="num">${e.n}</td><td class="num">${tok(e.out)}</td>` +
     `<td class="num">${usd(e.cost)}</td></tr>`).join('') ||
     '<tr><td class="muted" colspan="4">no data</td></tr>';
 
   const mt = $('t-models').querySelector('tbody');
   mt.innerHTML = models.map(mdl =>
-    `<tr><td>${shortModel(mdl)}</td><td class="num">${tok(s.by_model[mdl].out)}</td>` +
+    `<tr><td>${esc(shortModel(mdl))}</td><td class="num">${tok(s.by_model[mdl].out)}</td>` +
     `<td class="num">${usd(s.by_model[mdl].cost)}</td></tr>`).join('');
 
   const ll = $('live-list');
   ll.innerHTML = s.live_sessions.length
     ? s.live_sessions.map(x => {
         const ago = Math.max(0, Math.round((Date.now() - new Date(x.ts)) / 60000));
-        return `<li><span class="prj">${x.project}</span>` +
-               ` <span class="tag">${shortModel(x.model)} · ${ago}m ago</span></li>`;
+        return `<li><span class="prj">${esc(x.project)}</span>` +
+               ` <span class="tag">${esc(shortModel(x.model))} · ${ago}m ago</span></li>`;
       }).join('')
     : '<li class="muted">none</li>';
 

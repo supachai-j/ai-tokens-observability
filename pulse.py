@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rtk-pulse — live token-usage observability for Claude Code, rtk-style.
+"""AI Tokens Observability — live token-usage monitoring for Claude Code, rtk-style.
 
 Zero dependencies (Python 3.9+ stdlib only).
 
@@ -422,7 +422,7 @@ def cmd_report(days):
     idx, _ = refresh_index()
     s = build_summary(idx, days=days)
     t, today = s["window"], s["today"]
-    print("rtk-pulse — Claude Code Token Usage")
+    print("AI Tokens Observability — Claude Code Token Usage")
     print("═" * 64)
     print(f"Today:      in {fmt_tok(today['in'] + today['cr'] + today['cc5'] + today['cc1']):>8}"
           f"   out {fmt_tok(today['out']):>8}   ≈ ${today['cost']:.2f}   ({today['n']} msgs)")
@@ -483,7 +483,7 @@ def _fs_state():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "rtk-pulse"
+    server_version = "ai-tokens-observability"
 
     def log_message(self, *args):
         pass
@@ -559,7 +559,7 @@ def cmd_serve(port, open_browser):
     threading.Thread(target=_snapshot_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://localhost:{port}"
-    print(f"rtk-pulse dashboard → {url}")
+    print(f"AI Tokens Observability dashboard → {url}")
     if open_browser:
         subprocess.Popen(["open", url] if sys.platform == "darwin" else ["xdg-open", url])
     try:
@@ -571,7 +571,7 @@ def cmd_serve(port, open_browser):
 # ---------------------------------------------------------------- cli
 
 def main():
-    ap = argparse.ArgumentParser(prog="rtk-pulse", description=__doc__,
+    ap = argparse.ArgumentParser(prog="ai-tokens-observability", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("serve", help="live web dashboard")

@@ -1,11 +1,11 @@
-# rtk-pulse
+# AI Tokens Observability
 
 Live token-usage **observability dashboard** for Claude Code — companion to
 [rtk](https://github.com/) (Rust Token Killer). Zero dependencies, single-file
 Python (stdlib only) + one HTML page.
 
 ```
-rtk-pulse — Claude Code Token Usage
+AI Tokens Observability — Claude Code Token Usage
 ════════════════════════════════════════════════════════
 Today:      in    45.3M   out   254.5K   ≈ $38.12
 Cache hits: ███████████████████████░ 96.8%
@@ -15,9 +15,13 @@ rtk saved:  ██████████████░░░░░░░░�
 ## What it does
 
 - **Live web dashboard** (`serve`) — SSE-pushed updates every few seconds:
-  today/7d/30d token totals and cost estimates, daily stacked cost chart by
+  today/windowed token totals and cost estimates, daily stacked cost chart by
   model, cost-by-model donut, per-project table, cache-efficiency meter,
-  live-session feed, and an **rtk savings panel** (`rtk gain --format json`).
+  live throughput + activity feed, and an **rtk savings panel**
+  (`rtk gain --format json`).
+- **Filters** — by project, model, and time window (today–90d); light/dark
+  theme; USD/THB currency (live FX rate, cached 12h, `RTK_PULSE_THB`
+  override); live monitoring can be toggled on/off.
 - **rtk-style terminal report** (`report`) — indicator bars in your terminal.
 - **Usage snapshots** (`save`) — appends daily rollups to
   `~/.config/rtk-pulse/history.jsonl` (also auto-saved every 30 min while

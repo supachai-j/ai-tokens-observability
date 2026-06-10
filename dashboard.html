@@ -68,6 +68,20 @@
                     background: none; border: none; padding: 0; font-family: inherit;
                     text-transform: none; letter-spacing: 0; display: none; }
   .filters .clear.show { display: inline; }
+  .switch { margin-left: auto; }
+  .switch input { display: none; }
+  .switch .track {
+    width: 34px; height: 18px; border-radius: 9px; background: var(--soft-2);
+    border: 1px solid var(--border); display: inline-block; position: relative;
+    vertical-align: -4px; cursor: pointer; transition: background-color .2s;
+  }
+  .switch .track::after {
+    content: ""; position: absolute; top: 1px; left: 1px; width: 14px; height: 14px;
+    border-radius: 50%; background: var(--dim); transition: left .2s, background-color .2s;
+  }
+  .switch input:checked + .track { background: var(--green); }
+  .switch input:checked + .track::after { left: 17px; background: #fff; }
+  .hidden { display: none !important; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
            gap: 12px; margin-bottom: 18px; }
   .card { background: var(--panel); border: 1px solid var(--border);
@@ -134,6 +148,8 @@
       <option value="60">60d</option><option value="90">90d</option>
     </select></label>
   <button class="clear" id="f-clear" type="button">× clear filters</button>
+  <label class="switch" title="Enable/disable live monitoring">live monitoring
+    <input type="checkbox" id="f-live" checked><span class="track"></span></label>
 </div>
 
 <div class="cards">
@@ -150,7 +166,7 @@
     <div class="meter"><div id="m-rtk"></div></div></div>
 </div>
 
-<div class="grid">
+<div class="grid" id="live-row">
   <div class="panel"><h2>Live throughput <span class="tag">output tokens / min · last 30 min</span></h2>
     <canvas id="chart-rate"></canvas></div>
   <div class="panel">
@@ -343,8 +359,11 @@ function render(s) {
       }).join('')
     : '<li class="muted">none</li>';
 
-  $('status').innerHTML = `<span class="dot live" id="dot"></span>live · updated ` +
-    new Date(s.generated_at).toLocaleTimeString();
+  $('status').innerHTML = liveOn
+    ? `<span class="dot live" id="dot"></span>live · updated ` +
+      new Date(s.generated_at).toLocaleTimeString()
+    : `<span class="dot" id="dot"></span>paused · updated ` +
+      new Date(s.generated_at).toLocaleTimeString();
 }
 
 // theme toggle
@@ -369,20 +388,38 @@ function render(s) {
 applyChartTheme();
 
 let es = null;
+let liveOn = (() => { try { return localStorage.getItem('live') !== '0'; } catch (e) { return true; } })();
+
+function disconnect() {
+  if (es) { es.close(); es = null; }
+}
 function connect() {
-  if (es) es.close();
+  disconnect();
+  if (!liveOn) return;
   es = new EventSource('/events?' + qs());
   es.onmessage = e => render(JSON.parse(e.data));
   es.onerror = () => {
     $('status').innerHTML = '<span class="dot" id="dot"></span>reconnecting…';
-    es.close();
-    setTimeout(connect, 3000);
+    disconnect();
+    setTimeout(() => { if (liveOn) connect(); }, 3000);
   };
 }
 function applyFilters() {
   fetch('/api/summary?' + qs()).then(r => r.json()).then(render).catch(() => {});
   connect();
 }
+function setLive(on) {
+  liveOn = on;
+  try { localStorage.setItem('live', on ? '1' : '0'); } catch (e) {}
+  $('f-live').checked = on;
+  $('live-row').classList.toggle('hidden', !on);
+  if (on) applyFilters();
+  else {
+    disconnect();
+    if (lastSummary) render(lastSummary);
+  }
+}
+$('f-live').addEventListener('change', () => setLive($('f-live').checked));
 ['f-project', 'f-model', 'f-days'].forEach(id =>
   $(id).addEventListener('change', () => {
     state.project = $('f-project').value;
@@ -395,6 +432,8 @@ $('f-clear').addEventListener('click', () => {
   $('f-project').value = $('f-model').value = '';
   applyFilters();
 });
+$('f-live').checked = liveOn;
+$('live-row').classList.toggle('hidden', !liveOn);
 applyFilters();
 </script>
 </body>

@@ -48,6 +48,41 @@ def _claude_msg(ts, model, inp, out, cr=0, cc=0, req_id="r1", msg_id="m1"):
 
 
 # ---------------------------------------------------------------------------
+# 0. _project_name — HOME_PREFIX generalization
+# ---------------------------------------------------------------------------
+
+class TestProjectName(unittest.TestCase):
+    def _fake_path(self, dir_name):
+        """Return a fake Path whose .parent.name == dir_name."""
+        return Path("/fake") / dir_name / "sess.jsonl"
+
+    def test_home_prefix_stripped(self):
+        """Directory names starting with HOME_PREFIX lose that prefix."""
+        # Claude Code encodes /Users/alice/workspace/rtk as -Users-alice-workspace-rtk
+        # (each "/" including the leading one becomes "-").
+        home_slug = str(Path.home()).replace("/", "-")  # e.g. "-Users-alice"
+        dir_name = home_slug + "-workspace-rtk"         # e.g. "-Users-alice-workspace-rtk"
+        result = pulse._project_name(self._fake_path(dir_name))
+        self.assertEqual(result, "workspace-rtk")
+
+    def test_non_home_path_unchanged(self):
+        """Directory names that don't start with HOME_PREFIX pass through."""
+        result = pulse._project_name(self._fake_path("-private-tmp-m3deal"))
+        self.assertEqual(result, "-private-tmp-m3deal")
+
+    def test_no_over_strip_short_prefix(self):
+        """A name shorter than HOME_PREFIX is returned as-is."""
+        result = pulse._project_name(self._fake_path("myproject"))
+        self.assertEqual(result, "myproject")
+
+    def test_home_prefix_constant_derived_from_home(self):
+        """HOME_PREFIX ends with '-' and equals the home dir slug + '-'."""
+        self.assertTrue(pulse.HOME_PREFIX.endswith("-"))
+        expected = str(Path.home()).replace("/", "-") + "-"
+        self.assertEqual(pulse.HOME_PREFIX, expected)
+
+
+# ---------------------------------------------------------------------------
 # 1. Cost / rates / model_source
 # ---------------------------------------------------------------------------
 

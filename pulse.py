@@ -39,6 +39,13 @@ DEFAULT_PORT = 8377
 LIVE_WINDOW_MIN = 10  # a project counts as "live" if active within this many minutes
 KEEP_DAYS = 90
 
+# Claude stores projects as directory names that replace "/" with "-" and strip
+# the leading "/".  On a typical macOS/Linux install the home directory itself
+# becomes a prefix we want to drop so that e.g.
+#   "-Users-alice-workspace-rtk" → "workspace-rtk"
+# Derive the prefix at import time so it works for any username / OS.
+HOME_PREFIX = str(Path.home()).replace("/", "-") + "-"
+
 # $/MTok (input, output), list-price estimates. Matched top-down by substring.
 PRICING = [
     # Anthropic (Claude Code)
@@ -142,9 +149,8 @@ def _save_index(idx):
 
 def _project_name(jsonl_path):
     name = jsonl_path.parent.name
-    for prefix in ("-Users-tumz-", "-Users-", "-home-"):
-        if name.startswith(prefix):
-            return name[len(prefix):]
+    if name.startswith(HOME_PREFIX):
+        return name[len(HOME_PREFIX):]
     return name
 
 

@@ -781,6 +781,77 @@ class TestBuildSummary(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# by_tool aggregation
+# ---------------------------------------------------------------------------
+
+class TestBuildSummaryByTool(unittest.TestCase):
+    """by_tool groups model entries by model_source, summing n/out/cost."""
+
+    def _make_mixed_idx(self):
+        """Index with two claude models and one codex model."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        idx["days"][today] = {
+            "projA": {
+                "claude-sonnet-4-5": {
+                    "in": 1000, "out": 500, "cc5": 0, "cc1": 0,
+                    "cr": 0, "n": 3, "cost": 0.01,
+                },
+                "claude-opus-4-6": {
+                    "in": 2000, "out": 800, "cc5": 0, "cc1": 0,
+                    "cr": 0, "n": 2, "cost": 0.05,
+                },
+                "gpt-4o": {
+                    "in": 500, "out": 200, "cc5": 0, "cc1": 0,
+                    "cr": 0, "n": 1, "cost": 0.002,
+                },
+            },
+        }
+        return idx
+
+    def test_claude_models_collapsed_into_one_entry(self):
+        """claude-sonnet + claude-opus → single 'claude' by_tool entry."""
+        idx = self._make_mixed_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        self.assertIn("claude", s["by_tool"])
+        self.assertIn("codex", s["by_tool"])
+        # n and out should be summed across both claude models
+        self.assertEqual(s["by_tool"]["claude"]["n"], 5)   # 3 + 2
+        self.assertEqual(s["by_tool"]["claude"]["out"], 1300)  # 500 + 800
+        self.assertAlmostEqual(s["by_tool"]["claude"]["cost"], 0.06, places=5)
+
+    def test_codex_tool_entry_separate(self):
+        """gpt-4o maps to 'codex' tool bucket via model_source."""
+        idx = self._make_mixed_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        self.assertEqual(s["by_tool"]["codex"]["n"], 1)
+        self.assertEqual(s["by_tool"]["codex"]["out"], 200)
+
+    def test_source_filter_leaves_only_claude_tool(self):
+        """source='claude' filter → by_tool has only 'claude' key."""
+        idx = self._make_mixed_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90, source="claude")
+        self.assertIn("claude", s["by_tool"])
+        self.assertNotIn("codex", s["by_tool"])
+
+    def test_by_tool_sorted_by_cost_desc(self):
+        """by_tool entries are ordered highest cost first."""
+        idx = self._make_mixed_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        costs = [e["cost"] for e in s["by_tool"].values()]
+        self.assertEqual(costs, sorted(costs, reverse=True))
+
+
+# ---------------------------------------------------------------------------
 # 9. save_snapshot — history.jsonl pruning
 # ---------------------------------------------------------------------------
 

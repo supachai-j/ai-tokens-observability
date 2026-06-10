@@ -511,7 +511,7 @@ function loadTrace() {
     $('tr-summary').textContent =
       `${sm.steps} steps · ${sm.prompts} prompts · ${sm.tools} tool calls · ` +
       `${sm.mcp} MCP · in ${tok(sm.in + sm.cache)} / out ${tok(sm.out)} · ${usd(sm.cost)}` +
-      (d.truncated ? ' · showing last 600 steps' : '');
+      (d.truncated ? ` · showing last ${d.steps.length} steps` : '');
     const tb = $('t-trace').querySelector('tbody');
     tb.innerHTML = d.steps.map(s => {
       const hhmm = s.ts ? new Date(s.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';

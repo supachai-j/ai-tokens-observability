@@ -626,7 +626,10 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
 
 # ---------------------------------------------------------------- tracing
 
-TRACE_MAX_STEPS = 600
+try:
+    TRACE_MAX_STEPS = max(50, int(os.environ.get("RTK_PULSE_TRACE_MAX", 600)))
+except (ValueError, TypeError):
+    TRACE_MAX_STEPS = 600
 
 
 def _ex(text, n=220):

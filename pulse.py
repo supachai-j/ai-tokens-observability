@@ -858,7 +858,28 @@ def save_snapshot(summary=None):
     }
     with open(HISTORY_FILE, "a") as f:
         f.write(json.dumps(line, separators=(",", ":")) + "\n")
+    # Prune history to KEEP_DAYS so the file doesn't grow unbounded.
+    cutoff = (datetime.now() - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d")
+    try:
+        with open(HISTORY_FILE) as f:
+            entries = f.readlines()
+        pruned = [e for e in entries if _history_date(e) >= cutoff]
+        if len(pruned) < len(entries):
+            tmp = HISTORY_FILE.with_suffix(".tmp")
+            with open(tmp, "w") as f:
+                f.writelines(pruned)
+            tmp.replace(HISTORY_FILE)
+    except OSError:
+        pass
     return line
+
+
+def _history_date(line):
+    """Extract the date field from a history.jsonl line; return '' on parse error."""
+    try:
+        return json.loads(line).get("date", "")
+    except ValueError:
+        return ""
 
 
 # ---------------------------------------------------------------- terminal report
@@ -1012,8 +1033,8 @@ def _snapshot_loop(interval_min=30):
         time.sleep(interval_min * 60)
         try:
             save_snapshot()
-        except OSError:
-            pass
+        except Exception as e:  # broad catch: loop must survive any bad cycle
+            print(f"[rtk-pulse] snapshot error (skipping): {e}", file=sys.stderr)
 
 
 def cmd_serve(port, open_browser):

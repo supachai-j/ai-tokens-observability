@@ -113,7 +113,7 @@ def cost_usd(model, inp, out, cc5, cc1, cr):
 
 EMPTY = {"in": 0, "out": 0, "cc5": 0, "cc1": 0, "cr": 0, "n": 0, "cost": 0.0}
 
-_lock = threading.Lock()
+_lock = threading.RLock()  # RLock allows recursive re-entry (refresh_index force=True path)
 
 
 def _empty_index():

@@ -109,6 +109,26 @@
   .tag { color: var(--dim); font-size: 11px; text-transform: none; letter-spacing: 0; }
   #live-list li { list-style: none; padding: 6px 0; border-bottom: 1px solid var(--border); }
   #live-list .prj { color: var(--text); }
+  .trace-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .trace-bar select { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+                      border-radius: 6px; padding: 5px 8px; font: 12px ui-monospace, Menlo, monospace;
+                      max-width: 460px; }
+  .trace-bar button { background: var(--soft-1); color: var(--text); border: 1px solid var(--border);
+                      border-radius: 6px; padding: 5px 12px; font: 12px ui-monospace, Menlo, monospace;
+                      cursor: pointer; }
+  .trace-bar button:hover { background: var(--soft-2); }
+  #trace-wrap { max-height: 440px; overflow-y: auto; }
+  .b { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px;
+       text-transform: uppercase; letter-spacing: .5px; border: 1px solid var(--border);
+       color: var(--dim); white-space: nowrap; }
+  .b-prompt { color: var(--accent); border-color: var(--accent); }
+  .b-assistant { color: var(--green); border-color: var(--green); }
+  .b-tool { color: var(--amber); border-color: var(--amber); }
+  .b-mcp { color: var(--purple); border-color: var(--purple); }
+  .b-usage { color: var(--text); }
+  .b-err { color: var(--red); border-color: var(--red); }
+  #t-trace td { font-size: 12px; }
+  #t-trace .name { color: var(--text); }
   .muted { color: var(--dim); }
   canvas { max-height: 260px; }
   #feed-wrap { max-height: 280px; overflow-y: auto; }
@@ -205,6 +225,20 @@
     <table id="t-models"><thead>
       <tr><th>model</th><th class="num">out tok</th><th class="num">cost</th></tr>
     </thead><tbody></tbody></table>
+  </div>
+</div>
+
+<div class="panel" style="margin-bottom:12px">
+  <h2>Tracing <span class="tag">prompts · tool calls · MCP · token usage per call</span></h2>
+  <div class="trace-bar">
+    <select id="tr-session"><option value="">loading sessions…</option></select>
+    <button id="tr-load" type="button">load trace</button>
+    <span id="tr-summary" class="tag"></span>
+  </div>
+  <div id="trace-wrap">
+    <table id="t-trace"><thead>
+      <tr><th>time</th><th>type</th><th>detail</th><th class="num">tokens</th><th class="num">cost</th></tr>
+    </thead><tbody><tr><td class="muted" colspan="5">pick a session and load its trace</td></tr></tbody></table>
   </div>
 </div>
 
@@ -424,8 +458,63 @@ function connect() {
 }
 function applyFilters() {
   fetch('/api/summary?' + qs()).then(r => r.json()).then(render).catch(() => {});
+  loadSessions();
   connect();
 }
+
+// ---- tracing ----
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function loadSessions() {
+  fetch('/api/sessions?' + qs()).then(r => r.json()).then(list => {
+    const sel = $('tr-session');
+    const prev = sel.value;
+    sel.innerHTML = list.length
+      ? list.map(s =>
+          `<option value="${encodeURIComponent(s.path)}">` +
+          `${esc(s.project || '(no project)')} · ${s.source} · ` +
+          `${new Date(s.mtime * 1000).toLocaleString()}</option>`).join('')
+      : '<option value="">no sessions</option>';
+    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  }).catch(() => {});
+}
+
+const BADGE = { prompt: 'prompt', assistant: 'assistant', thinking: 'thinking',
+                tool: 'tool', mcp: 'mcp', tool_result: 'result', usage: 'usage' };
+
+function loadTrace() {
+  const v = $('tr-session').value;
+  if (!v) return;
+  $('tr-summary').textContent = 'loading…';
+  fetch('/api/trace?path=' + v).then(r => r.json()).then(d => {
+    if (d.error) { $('tr-summary').textContent = d.error; return; }
+    const sm = d.summary;
+    $('tr-summary').textContent =
+      `${sm.steps} steps · ${sm.prompts} prompts · ${sm.tools} tool calls · ` +
+      `${sm.mcp} MCP · in ${tok(sm.in + sm.cache)} / out ${tok(sm.out)} · ${usd(sm.cost)}` +
+      (d.truncated ? ' · showing last 600 steps' : '');
+    const tb = $('t-trace').querySelector('tbody');
+    tb.innerHTML = d.steps.map(s => {
+      const hhmm = s.ts ? new Date(s.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+      const cls = s.error ? 'b b-err' : 'b b-' + (s.kind === 'tool_result' ? 'tool' : s.kind);
+      const badge = `<span class="${cls}">${BADGE[s.kind] || s.kind}${s.error ? ' ✗' : ''}</span>`;
+      let detail, tokens = '', cost = '';
+      if (s.kind === 'usage') {
+        detail = `<span class="muted">${esc(shortModel(s.model || ''))}</span>`;
+        tokens = `in ${tok(s.in + s.cache)} · out ${tok(s.out)}`;
+        cost = usd3(s.cost);
+      } else {
+        const name = s.name ? `<span class="name">${esc(s.name)}</span> ` : '';
+        detail = name + `<span class="muted">${esc(s.text || '')}</span>`;
+      }
+      return `<tr><td>${hhmm}</td><td>${badge}</td><td>${detail}</td>` +
+             `<td class="num">${tokens}</td><td class="num">${cost}</td></tr>`;
+    }).join('') || '<tr><td class="muted" colspan="5">empty trace</td></tr>';
+  }).catch(() => { $('tr-summary').textContent = 'failed to load trace'; });
+}
+$('tr-load').addEventListener('click', loadTrace);
+$('tr-session').addEventListener('change', loadTrace);
 function setLive(on) {
   liveOn = on;
   try { localStorage.setItem('live', on ? '1' : '0'); } catch (e) {}

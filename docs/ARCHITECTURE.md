@@ -125,8 +125,10 @@ the frontend so switching USD/THB is instant.
 | Route | Purpose |
 |---|---|
 | `GET /` | serves `dashboard.html` from disk (always fresh — no rebuild step) |
-| `GET /api/summary?project=&model=&days=` | one filtered summary JSON |
-| `GET /events?project=&model=&days=` | SSE stream of filtered summaries |
+| `GET /api/summary?project=&model=&source=&days=` | one filtered summary JSON |
+| `GET /events?project=&model=&source=&days=` | SSE stream of filtered summaries |
+| `GET /api/sessions?project=&source=` | recent sessions across tools (newest first) |
+| `GET /api/trace?path=` | full trace of one session: prompts, assistant/thinking text, tool + MCP calls, tool results, per-call usage/cost. `path` must exactly match a discovered session file — anything else is rejected (no traversal). Traces are built on demand from the raw session file, not from the index; capped at the last 600 steps. |
 
 The SSE loop polls a cheap filesystem fingerprint (file count + total size +
 max mtime over the transcript tree) every 3 s; only when it changes does it

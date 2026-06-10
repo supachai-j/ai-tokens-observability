@@ -585,6 +585,251 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
     }
 
 
+# ---------------------------------------------------------------- tracing
+
+TRACE_MAX_STEPS = 600
+
+
+def _ex(text, n=220):
+    text = str(text or "").strip().replace("\n", " ")
+    return text[:n] + ("…" if len(text) > n else "")
+
+
+def _usage_step(ts, model, inp, out, cr, cc=0):
+    return {"ts": ts, "kind": "usage", "model": model,
+            "in": inp, "out": out, "cache": cr + cc,
+            "cost": round(cost_usd(model, inp, out, cc, 0, cr), 6)}
+
+
+def _trace_claude(path):
+    steps, last_usage_key = [], ""
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            t, ts = d.get("type"), d.get("timestamp") or ""
+            if t == "user":
+                c = (d.get("message") or {}).get("content")
+                if isinstance(c, str):
+                    steps.append({"ts": ts, "kind": "prompt", "text": _ex(c)})
+                elif isinstance(c, list):
+                    for b in c:
+                        if not isinstance(b, dict):
+                            continue
+                        if b.get("type") == "text":
+                            steps.append({"ts": ts, "kind": "prompt",
+                                          "text": _ex(b.get("text"))})
+                        elif b.get("type") == "tool_result":
+                            content = b.get("content")
+                            if isinstance(content, list):
+                                content = " ".join(x.get("text", "") for x in content
+                                                   if isinstance(x, dict))
+                            steps.append({"ts": ts, "kind": "tool_result",
+                                          "text": _ex(content),
+                                          "error": bool(b.get("is_error"))})
+            elif t == "assistant":
+                m = d.get("message") or {}
+                model = m.get("model") or ""
+                for b in m.get("content") or []:
+                    if not isinstance(b, dict):
+                        continue
+                    bt = b.get("type")
+                    if bt == "text":
+                        steps.append({"ts": ts, "kind": "assistant",
+                                      "model": model, "text": _ex(b.get("text"))})
+                    elif bt == "thinking":
+                        steps.append({"ts": ts, "kind": "thinking",
+                                      "model": model, "text": _ex(b.get("thinking"))})
+                    elif bt == "tool_use":
+                        name = b.get("name") or ""
+                        steps.append({"ts": ts,
+                                      "kind": "mcp" if name.startswith("mcp__") else "tool",
+                                      "name": name,
+                                      "text": _ex(json.dumps(b.get("input") or {}))})
+                usage = m.get("usage") or {}
+                key = (d.get("requestId") or "") + "/" + (m.get("id") or "")
+                if usage and model and model != "<synthetic>" and key != last_usage_key:
+                    last_usage_key = key
+                    steps.append(_usage_step(
+                        ts, model,
+                        usage.get("input_tokens") or 0,
+                        usage.get("output_tokens") or 0,
+                        usage.get("cache_read_input_tokens") or 0,
+                        usage.get("cache_creation_input_tokens") or 0))
+    return steps
+
+
+def _trace_codex(path):
+    steps, model, prev = [], "", {}
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            t, p = d.get("type"), d.get("payload") or {}
+            ts = d.get("timestamp") or ""
+            if t == "turn_context":
+                model = p.get("model") or model
+            elif t == "response_item":
+                pt = p.get("type")
+                if pt == "message":
+                    c = p.get("content")
+                    if isinstance(c, list):
+                        c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+                    kind = "prompt" if p.get("role") == "user" else "assistant"
+                    steps.append({"ts": ts, "kind": kind, "model": model, "text": _ex(c)})
+                elif pt in ("function_call", "custom_tool_call", "local_shell_call"):
+                    name = p.get("name") or pt
+                    steps.append({"ts": ts,
+                                  "kind": "mcp" if "mcp" in name.lower() else "tool",
+                                  "name": name,
+                                  "text": _ex(p.get("arguments") or p.get("input") or "")})
+                elif pt in ("function_call_output", "custom_tool_call_output"):
+                    out = p.get("output")
+                    if isinstance(out, dict):
+                        out = out.get("content") or json.dumps(out)
+                    steps.append({"ts": ts, "kind": "tool_result", "text": _ex(out)})
+                elif pt == "reasoning":
+                    s = p.get("summary")
+                    if isinstance(s, list):
+                        s = " ".join(x.get("text", "") if isinstance(x, dict) else str(x)
+                                     for x in s)
+                    if s:
+                        steps.append({"ts": ts, "kind": "thinking",
+                                      "model": model, "text": _ex(s)})
+            elif t == "event_msg" and p.get("type") == "token_count":
+                info = p.get("info") or {}
+                last, cur = info.get("last_token_usage") or {}, info.get("total_token_usage") or {}
+                if not last or cur == prev:
+                    continue
+                prev = cur
+                inp = last.get("input_tokens") or 0
+                cr = last.get("cached_input_tokens") or 0
+                steps.append(_usage_step(ts, model, max(0, inp - cr),
+                                         last.get("output_tokens") or 0, cr))
+    return steps
+
+
+def _trace_gemini(path):
+    steps = []
+    if path.suffix == ".jsonl":
+        msgs = []
+        with open(path, errors="replace") as f:
+            for line in f:
+                try:
+                    msgs.append(json.loads(line))
+                except ValueError:
+                    pass
+    else:
+        try:
+            with open(path) as f:
+                msgs = (json.load(f) or {}).get("messages") or []
+        except (OSError, ValueError):
+            return steps
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        ts = m.get("timestamp") or ""
+        if m.get("type") == "user":
+            steps.append({"ts": ts, "kind": "prompt", "text": _ex(m.get("content"))})
+            continue
+        model = m.get("model") or ""
+        th = m.get("thoughts")
+        if th:
+            if isinstance(th, list):
+                th = " ".join((x.get("subject") or x.get("description") or "")
+                              if isinstance(x, dict) else str(x) for x in th)
+            steps.append({"ts": ts, "kind": "thinking", "model": model, "text": _ex(th)})
+        for tc in m.get("toolCalls") or []:
+            if not isinstance(tc, dict):
+                continue
+            name = tc.get("name") or "tool"
+            steps.append({"ts": ts,
+                          "kind": "mcp" if "mcp" in name.lower() else "tool",
+                          "name": name,
+                          "text": _ex(json.dumps(tc.get("args") or tc.get("arguments") or {})),
+                          "error": tc.get("status") == "error"})
+        if m.get("content"):
+            steps.append({"ts": ts, "kind": "assistant", "model": model,
+                          "text": _ex(m.get("content"))})
+        tk = m.get("tokens") or {}
+        if tk and model:
+            inp = (tk.get("input") or 0) + (tk.get("tool") or 0)
+            cr = tk.get("cached") or 0
+            steps.append(_usage_step(ts, model, max(0, inp - cr),
+                                     (tk.get("output") or 0) + (tk.get("thoughts") or 0), cr))
+    return steps
+
+
+def list_sessions(project=None, source=None, limit=25):
+    """Recent sessions across all tools, newest first."""
+    out = []
+    for path, kind in _discover():
+        src = "gemini" if kind.startswith("gemini") else kind
+        if source and src != source:
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if st.st_size < 300:
+            continue
+        if kind == "claude":
+            prj = _project_name(path)
+        elif kind == "gemini-json" or kind == "gemini-jsonl":
+            prj = path.relative_to(GEMINI_TMP).parts[0]
+        else:
+            prj = ""
+        out.append({"path": str(path), "kind": kind, "source": src,
+                    "project": prj, "mtime": st.st_mtime, "size": st.st_size})
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    res = []
+    for s in out:
+        if s["kind"] == "codex" and not s["project"]:
+            try:
+                with open(s["path"], errors="replace") as f:
+                    first = json.loads(f.readline())
+                s["project"] = _cwd_project((first.get("payload") or {}).get("cwd") or "")
+            except (OSError, ValueError):
+                pass
+        if project and s["project"] != project:
+            continue
+        res.append(s)
+        if len(res) >= limit:
+            break
+    return res
+
+
+def build_trace(path_str):
+    kinds = {str(p): k for p, k in _discover()}
+    kind = kinds.get(path_str)
+    if not kind:  # unknown/unsafe path — only discovered files are traceable
+        return {"error": "unknown session"}
+    path = Path(path_str)
+    if kind == "claude":
+        steps = _trace_claude(path)
+    elif kind == "codex":
+        steps = _trace_codex(path)
+    else:
+        steps = _trace_gemini(path)
+    truncated = len(steps) > TRACE_MAX_STEPS
+    if truncated:
+        steps = steps[-TRACE_MAX_STEPS:]
+    summary = {"steps": len(steps),
+               "prompts": sum(1 for s in steps if s["kind"] == "prompt"),
+               "tools": sum(1 for s in steps if s["kind"] == "tool"),
+               "mcp": sum(1 for s in steps if s["kind"] == "mcp"),
+               "in": sum(s.get("in", 0) for s in steps),
+               "out": sum(s.get("out", 0) for s in steps),
+               "cache": sum(s.get("cache", 0) for s in steps),
+               "cost": round(sum(s.get("cost", 0) for s in steps), 4)}
+    return {"path": path_str, "kind": kind, "steps": steps,
+            "summary": summary, "truncated": truncated}
+
+
 def save_snapshot(summary=None):
     if summary is None:
         idx, _ = refresh_index()
@@ -714,6 +959,13 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/summary":
             idx, _ = refresh_index()
             body = json.dumps(build_summary(idx, project, model, days, source)).encode()
+            self._send(200, "application/json", body)
+        elif route == "/api/sessions":
+            body = json.dumps(list_sessions(project, source)).encode()
+            self._send(200, "application/json", body)
+        elif route == "/api/trace":
+            path_str = (q.get("path") or [""])[0]
+            body = json.dumps(build_trace(path_str)).encode()
             self._send(200, "application/json", body)
         elif route == "/events":
             self.send_response(200)

@@ -20,9 +20,14 @@ rtk saved:  ██████████████░░░░░░░░�
   model, cost-by-model donut, per-project table, cache-efficiency meter,
   live throughput + activity feed, and an **rtk savings panel**
   (`rtk gain --format json`).
-- **Filters** — by project, model, and time window (today–90d); light/dark
-  theme; USD/THB currency (live FX rate, cached 12h, `RTK_PULSE_THB`
-  override); live monitoring can be toggled on/off.
+- **Filters** — by tool (Claude Code / Codex / Gemini), project, model, and
+  time window (today–90d); light/dark theme; USD/THB currency (live FX rate,
+  cached 12h, `RTK_PULSE_THB` override); live monitoring can be toggled
+  on/off.
+- **Tracing** — pick any recent session and drill into its full timeline:
+  prompts, assistant output, thinking, tool calls, MCP calls (badged
+  separately), tool results (errors flagged), and per-API-call token
+  usage + cost.
 - **rtk-style terminal report** (`report`) — indicator bars in your terminal.
 - **Usage snapshots** (`save`) — appends daily rollups to
   `~/.config/rtk-pulse/history.jsonl` (also auto-saved every 30 min while

@@ -27,7 +27,8 @@ rtk saved:  ██████████████░░░░░░░░�
   cached 12h, `RTK_PULSE_THB` override); live monitoring can be toggled
   on/off.
 - **Long-term trend** — a daily cost line chart spanning up to 2 years of
-  saved snapshots, always global (all tools, all projects), currency-aware.
+  saved snapshots, always global (all tools, all projects), currency-aware;
+  downloadable as CSV (`⬇ CSV` link in the panel header).
 - **Tracing** — pick any recent session and drill into its full timeline:
   prompts, assistant output, thinking, tool calls, MCP calls (badged
   separately), tool results (errors flagged), and per-API-call token

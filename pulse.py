@@ -15,6 +15,8 @@ Data sources:
 """
 
 import argparse
+import csv
+import io
 import json
 import os
 import re
@@ -958,6 +960,19 @@ def read_history(max_days=None):
     return sorted(by_date.values(), key=lambda x: x["date"])
 
 
+_HISTORY_CSV_FIELDS = ["date", "cost", "out", "in", "n",
+                       "cache_hit_rate", "last30_cost", "rtk_saved"]
+
+
+def history_csv():
+    """Return history.jsonl rows as CSV text (header + one row per day, ascending)."""
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=_HISTORY_CSV_FIELDS, extrasaction="ignore")
+    w.writeheader()
+    w.writerows(read_history())
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------- terminal report
 
 def fmt_tok(n):
@@ -1041,11 +1056,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def _send(self, code, ctype, body):
+    def _send(self, code, ctype, body, extra=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if extra:
+            for k, v in extra.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1080,6 +1098,10 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/history":
             body = json.dumps(read_history()).encode()
             self._send(200, "application/json", body)
+        elif route == "/api/history.csv":
+            body = history_csv().encode()
+            self._send(200, "text/csv; charset=utf-8", body,
+                       extra={"Content-Disposition": 'attachment; filename="rtk-pulse-history.csv"'})
         elif route == "/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

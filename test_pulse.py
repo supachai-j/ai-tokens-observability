@@ -11,6 +11,9 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1237,6 +1240,122 @@ class TestFxThbEnvOverride(unittest.TestCase):
         # Should return the memo value (not env, not network)
         self.assertAlmostEqual(rate, 31.0)
         self.assertNotEqual(src, "env")
+
+
+# ---------------------------------------------------------------------------
+# TestHttpRoutes — live ThreadingHTTPServer on port 0, hermetic patches
+# ---------------------------------------------------------------------------
+
+class TestHttpRoutes(unittest.TestCase):
+    """Boot a real ThreadingHTTPServer on an OS-assigned port; hit every route."""
+
+    _HIST_ROWS = [
+        {"date": "2026-01-01", "ts": "2026-01-01T12:00:00",
+         "today": {"cost": 2.22, "out": 100, "in": 50, "cr": 0, "cc5": 0, "cc1": 0, "n": 1},
+         "cache_hit_rate": 0.2, "last30_cost": 5.0, "rtk_saved": None},
+        {"date": "2026-01-02", "ts": "2026-01-02T12:00:00",
+         "today": {"cost": 3.33, "out": 200, "in": 80, "cr": 0, "cc5": 0, "cc1": 0, "n": 2},
+         "cache_hit_rate": 0.3, "last30_cost": 6.0, "rtk_saved": None},
+    ]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        data_dir = Path(self.tmp.name)
+        hist_file = data_dir / "history.jsonl"
+        hist_file.write_text(
+            "\n".join(json.dumps(r) for r in self._HIST_ROWS) + "\n"
+        )
+        # Patch at module level so the server thread sees them.
+        self._patches = [
+            patch("pulse._discover", return_value=[]),
+            patch("pulse.fx_thb", return_value=(32.0, "test")),
+            patch("pulse.rtk_gain", return_value=None),
+            patch("pulse.DATA_DIR", data_dir),
+            patch("pulse.INDEX_FILE", data_dir / "index.json"),
+            patch("pulse.HISTORY_FILE", hist_file),
+        ]
+        for p in self._patches:
+            p.start()
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), pulse.Handler)
+        self.port = self.srv.server_address[1]
+        self._thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self._thread.start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        for p in self._patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def _get(self, path):
+        return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}")
+
+    def _json(self, path):
+        with self._get(path) as r:
+            return json.loads(r.read()), r
+
+    def test_root_serves_dashboard(self):
+        """GET / → 200, text/html, body contains chart-history canvas."""
+        with self._get("/") as r:
+            self.assertEqual(r.status, 200)
+            self.assertIn("text/html", r.headers.get("Content-Type", ""))
+            body = r.read().decode()
+        self.assertIn('id="chart-history"', body)
+
+    def test_api_summary_returns_json(self):
+        """/api/summary → 200, application/json, required keys present."""
+        data, resp = self._json("/api/summary")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("application/json", resp.headers.get("Content-Type", ""))
+        for key in ("by_tool", "budget", "daily"):
+            self.assertIn(key, data, f"key '{key}' missing from /api/summary")
+
+    def test_api_summary_days_clamp(self):
+        """/api/summary?days=9999 → filter.days clamped to KEEP_DAYS (90)."""
+        data, _ = self._json(f"/api/summary?days=9999")
+        self.assertEqual(data["filter"]["days"], pulse.KEEP_DAYS)
+
+    def test_api_summary_days_invalid(self):
+        """/api/summary?days=abc → filter.days defaults to 30."""
+        data, _ = self._json("/api/summary?days=abc")
+        self.assertEqual(data["filter"]["days"], 30)
+
+    def test_api_sessions_returns_list(self):
+        """/api/sessions → 200, JSON list (empty because _discover is patched to [])."""
+        data, resp = self._json("/api/sessions")
+        self.assertEqual(resp.status, 200)
+        self.assertIsInstance(data, list)
+
+    def test_api_history_returns_seeded_rows(self):
+        """/api/history → 200, JSON list of seeded history rows."""
+        data, resp = self._json("/api/history")
+        self.assertEqual(resp.status, 200)
+        self.assertIsInstance(data, list)
+        self.assertGreaterEqual(len(data), 1)
+
+    def test_api_history_csv_format(self):
+        """/api/history.csv → 200, text/csv, correct header, Content-Disposition."""
+        with self._get("/api/history.csv") as r:
+            self.assertEqual(r.status, 200)
+            ctype = r.headers.get("Content-Type", "")
+            self.assertIn("text/csv", ctype)
+            disp = r.headers.get("Content-Disposition", "")
+            self.assertIn("attachment", disp)
+            first_line = r.read().decode().splitlines()[0]
+        self.assertEqual(first_line, "date,cost,out,in,n,cache_hit_rate,last30_cost,rtk_saved")
+
+    def test_api_trace_unknown_path_returns_error(self):
+        """/api/trace?path=bogus → 200 JSON with 'error' key."""
+        data, resp = self._json("/api/trace?path=bogus")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("error", data)
+
+    def test_unknown_route_returns_404(self):
+        """GET /nope → 404."""
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._get("/nope")
+        self.assertEqual(ctx.exception.code, 404)
 
 
 # ---------------------------------------------------------------------------

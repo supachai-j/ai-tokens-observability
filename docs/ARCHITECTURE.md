@@ -136,6 +136,7 @@ the frontend so switching USD/THB is instant.
 | `GET /api/sessions?project=&source=` | recent sessions across tools (newest first) |
 | `GET /api/trace?path=` | full trace of one session: prompts, assistant/thinking text, tool + MCP calls, tool results, per-call usage/cost. `path` must exactly match a discovered session file — anything else is rejected (no traversal). Traces are built on demand from the raw session file, not from the index; capped at the last N steps (default 600, configurable via `RTK_PULSE_TRACE_MAX`, min 50). |
 | `GET /api/history` | parsed `history.jsonl` as a JSON array — one object per calendar day (deduped, ascending). Per-day keys: `date`, `cost`, `out`, `in` (total input incl. cache), `n`, `cache_hit_rate`, `last30_cost`, `rtk_saved`. Global/unfiltered; serves the long-term trend panel. |
+| `GET /api/history.csv` | same data as `/api/history` as a UTF-8 CSV download (`Content-Disposition: attachment`). Header row: `date,cost,out,in,n,cache_hit_rate,last30_cost,rtk_saved`. |
 
 The SSE loop polls a cheap filesystem fingerprint (file count + total size +
 max mtime over the transcript tree) every 3 s; only when it changes does it

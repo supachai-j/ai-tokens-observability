@@ -1,6 +1,7 @@
 # AI Tokens Observability
 
-Live token-usage **observability dashboard** for Claude Code — companion to
+Live token-usage **observability dashboard** for AI coding tools — **Claude
+Code, OpenAI Codex CLI, and Gemini CLI** — companion to
 [rtk](https://github.com/) (Rust Token Killer). Zero dependencies, single-file
 Python (stdlib only) + one HTML page.
 
@@ -29,10 +30,15 @@ rtk saved:  ██████████████░░░░░░░░�
 
 ## Data sources
 
-| Source | What |
-|---|---|
-| `~/.claude/projects/**/*.jsonl` | Claude Code transcripts — per-message `usage` (input/output/cache tokens, model) |
-| `rtk gain --format json` | rtk token-savings analytics (optional — panel shows `n/a` without it) |
+| Source | Tool | What |
+|---|---|---|
+| `~/.claude/projects/**/*.jsonl` | Claude Code | per-message `usage` (input/output/cache tokens, model) |
+| `~/.codex/sessions/**/rollout-*.jsonl` | Codex CLI | `token_count` events (cumulative totals, deduped via deltas) |
+| `~/.gemini/tmp/*/chats/**` | Gemini CLI | per-message `tokens` (input/output/cached/thoughts) |
+| `rtk gain --format json` | rtk | token-savings analytics (optional — panel shows `n/a` without it) |
+
+Tools that aren't installed are simply skipped. A **tool filter** on the
+dashboard slices everything by Claude Code / Codex CLI / Gemini CLI.
 
 Parsing is **incremental**: a byte-offset index (`~/.config/rtk-pulse/index.json`)
 means only appended transcript data is re-read. A cold scan of ~300 MB takes
@@ -104,10 +110,12 @@ Add to `~/.claude/settings.json` to save a snapshot at the end of every session:
 
 ## Cost model
 
-Estimates use API list prices per MTok — Fable 5 $10/$50 · Opus 4.8/4.7/4.6
-$5/$25 · older Opus $15/$75 · Sonnet $3/$15 · Haiku 4.5 $1/$5 — with cache
-read at 0.1× input and cache writes at 1.25× (5m TTL) / 2× (1h TTL). These are
-**estimates of equivalent API cost**, not what a subscription plan bills.
+Estimates use API list prices per MTok — e.g. Fable 5 $10/$50 · Opus
+4.8/4.7/4.6 $5/$25 · Sonnet $3/$15 · Haiku 4.5 $1/$5 · GPT-5 family
+$1.25/$10 ($0.25/$2 mini) · Gemini 3 Pro $2/$12 · Gemini 3 Flash $0.30/$2.50.
+Cache reads cost 0.1× input (0.25× for Gemini); Anthropic cache writes cost
+1.25× (5m TTL) / 2× (1h TTL). These are **estimates of equivalent API cost**,
+not what a subscription plan bills.
 
 Message dedup follows the transcript format: multi-block assistant messages
 repeat the same `usage` on adjacent lines, so events are deduped on

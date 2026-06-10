@@ -11,6 +11,8 @@ pieces fit together and why they're designed this way.
 flowchart LR
     subgraph sources [Data sources]
         T["~/.claude/projects/**/*.jsonl<br>Claude Code transcripts"]
+        CX["~/.codex/sessions/**/rollout-*.jsonl<br>Codex CLI sessions"]
+        GM["~/.gemini/tmp/*/chats/**<br>Gemini CLI chats"]
         R["rtk gain --format json<br>(optional)"]
         FX["open.er-api.com<br>USD→THB rate (optional)"]
     end
@@ -24,7 +26,10 @@ flowchart LR
     D[dashboard.html<br>Chart.js + EventSource]
     CLI[terminal report / save / scan]
 
-    T --> SC --> IX --> AG --> HTTP --> D
+    T --> SC
+    CX --> SC
+    GM --> SC
+    SC --> IX --> AG --> HTTP --> D
     R --> AG
     FX --> AG
     AG --> SNAP
@@ -37,10 +42,24 @@ Chart.js CDN fetch by the browser and the FX rate lookup, both optional).
 
 ## Components
 
-### 1. Incremental scanner (`_scan_file`, `refresh_index`)
+### 1. Incremental scanner — source adapters (`_scan_*`, `refresh_index`)
 
-Claude Code appends one JSON line per event to per-session transcript files.
-The scanner:
+Usage data is collected through per-tool **adapters** that all normalize into
+one event shape (`_emit`: ts, project, model, input, output, cache-write
+5m/1h, cache-read):
+
+| Adapter | Files | Parse strategy |
+|---|---|---|
+| `claude` | `~/.claude/projects/*/*.jsonl` | append-only JSONL, byte-offset cursor; dedupe on `requestId + message.id` |
+| `codex` | `~/.codex/sessions/**/rollout-*.jsonl` | append-only JSONL; `token_count` events carry *cumulative* totals — usage is the delta vs the persisted previous total (robust to duplicate emissions); model/cwd tracked from `turn_context`/`session_meta` lines |
+| `gemini-jsonl` | `~/.gemini/tmp/*/chats/*.jsonl` | append-only JSONL, one message per line with `tokens{input,output,cached,thoughts}` |
+| `gemini-json` | `~/.gemini/tmp/*/chats/**/*.json` | whole-document rewrite; cursor is the consumed *message count* (messages are append-only within a session) |
+
+For Codex and Gemini, `input` includes cached tokens, and reasoning/"thoughts"
+tokens are billed as output — the adapters normalize both. Tools not installed
+are skipped at discovery. A model's vendor (`model_source`) is inferred from
+its id (claude-/gpt-/gemini-…), which powers the dashboard's tool filter
+without any index change. The Claude Code adapter specifics:
 
 - Tracks `(size, mtime, byte offset)` per file in the index; on each refresh
   it only reads **appended bytes** of files whose stat changed. A cold scan

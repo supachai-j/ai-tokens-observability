@@ -137,6 +137,8 @@
 </header>
 
 <div class="filters">
+  <label>tool
+    <select id="f-source"><option value="">all</option></select></label>
   <label>project
     <select id="f-project"><option value="">all</option></select></label>
   <label>model
@@ -274,9 +276,11 @@ function applyChartTheme() {
 }
 
 let lastSummary = null;
-const state = { project: '', model: '', days: 30 };
+const state = { project: '', model: '', days: 30, source: '' };
 const qs = () => 'project=' + encodeURIComponent(state.project) +
-                 '&model=' + encodeURIComponent(state.model) + '&days=' + state.days;
+                 '&model=' + encodeURIComponent(state.model) +
+                 '&source=' + encodeURIComponent(state.source) + '&days=' + state.days;
+const TOOL_NAMES = { claude: 'Claude Code', codex: 'Codex CLI', gemini: 'Gemini CLI', other: 'other' };
 
 function fillSelect(sel, items, current, fmt) {
   if (sel.options.length === items.length + 1 && sel.value === current) return;
@@ -296,9 +300,10 @@ function render(s) {
   document.querySelectorAll('.win').forEach(el => el.textContent = winLabel);
   $('l-window').textContent = winLabel + ' · est. cost';
   $('l-cache').textContent = 'Cache hit rate (' + winLabel + ')';
+  fillSelect($('f-source'), s.sources, state.source, v => TOOL_NAMES[v] || v);
   fillSelect($('f-project'), s.projects, state.project);
   fillSelect($('f-model'), s.models, state.model, shortModel);
-  $('f-clear').classList.toggle('show', !!(state.project || state.model));
+  $('f-clear').classList.toggle('show', !!(state.project || state.model || state.source));
   $('c-today-out').textContent = tok(t.out);
   $('c-today-in').textContent = 'in ' + tok(t.in + t.cr + t.cc5 + t.cc1) + ' (incl. cache)';
   $('c-today-cost').textContent = usd(t.cost);
@@ -433,16 +438,17 @@ function setLive(on) {
   }
 }
 $('f-live').addEventListener('change', () => setLive($('f-live').checked));
-['f-project', 'f-model', 'f-days'].forEach(id =>
+['f-project', 'f-model', 'f-days', 'f-source'].forEach(id =>
   $(id).addEventListener('change', () => {
     state.project = $('f-project').value;
     state.model = $('f-model').value;
     state.days = +$('f-days').value;
+    state.source = $('f-source').value;
     applyFilters();
   }));
 $('f-clear').addEventListener('click', () => {
-  state.project = state.model = '';
-  $('f-project').value = $('f-model').value = '';
+  state.project = state.model = state.source = '';
+  $('f-project').value = $('f-model').value = $('f-source').value = '';
   applyFilters();
 });
 $('f-cur').addEventListener('change', () => {

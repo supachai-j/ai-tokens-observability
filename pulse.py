@@ -29,6 +29,8 @@ import urllib.request
 from urllib.parse import parse_qs, urlparse
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
+GEMINI_TMP = Path.home() / ".gemini" / "tmp"
 DATA_DIR = Path(os.environ.get("RTK_PULSE_HOME", Path.home() / ".config" / "rtk-pulse"))
 INDEX_FILE = DATA_DIR / "index.json"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
@@ -37,9 +39,9 @@ DEFAULT_PORT = 8377
 LIVE_WINDOW_MIN = 10  # a project counts as "live" if active within this many minutes
 KEEP_DAYS = 90
 
-# $/MTok (input, output). Cache read = 0.1x input; cache write 5m = 1.25x, 1h = 2x input.
-# Matched top-down by substring against the model id.
+# $/MTok (input, output), list-price estimates. Matched top-down by substring.
 PRICING = [
+    # Anthropic (Claude Code)
     ("fable", 10.0, 50.0),
     ("opus-4-8", 5.0, 25.0),
     ("opus-4-7", 5.0, 25.0),
@@ -49,20 +51,62 @@ PRICING = [
     ("haiku-4-5", 1.0, 5.0),
     ("haiku-3-5", 0.8, 4.0),
     ("haiku", 0.25, 1.25),
+    # OpenAI (Codex CLI)
+    ("codex-mini", 1.5, 6.0),
+    ("gpt-4o-mini", 0.15, 0.6),
+    ("gpt-4o", 2.5, 10.0),
+    ("gpt-4.1-mini", 0.4, 1.6),
+    ("gpt-4.1", 2.0, 8.0),
+    ("o4-mini", 1.1, 4.4),
+    ("o3", 2.0, 8.0),
+    # Google (Gemini CLI)
+    ("gemini-3-pro", 2.0, 12.0),
+    ("gemini-3-flash", 0.3, 2.5),
+    ("gemini-2.5-pro", 1.25, 10.0),
+    ("gemini-2.5-flash-lite", 0.1, 0.4),
+    ("gemini-2.5-flash", 0.3, 2.5),
+    ("gemini", 1.25, 10.0),
 ]
+
+
+def model_source(model):
+    """Which tool/vendor a model id belongs to."""
+    m = model.lower()
+    if m.startswith("claude") or any(s in m for s in ("opus", "sonnet", "haiku", "fable")):
+        return "claude"
+    if m.startswith(("gpt", "o1", "o3", "o4", "codex", "davinci")):
+        return "codex"
+    if m.startswith("gemini"):
+        return "gemini"
+    return "other"
 
 
 def rates_for(model):
     m = model.lower()
+    if "gpt-5" in m:  # gpt-5 family incl. dated/point releases and -codex variants
+        if "nano" in m:
+            return 0.05, 0.4
+        if "mini" in m:
+            return 0.25, 2.0
+        if "pro" in m:
+            return 15.0, 120.0
+        return 1.25, 10.0
     for sub, i, o in PRICING:
         if sub in m:
             return i, o
-    return 3.0, 15.0  # default to sonnet-tier
+    return {"codex": (1.25, 10.0), "gemini": (1.25, 10.0)}.get(
+        model_source(model), (3.0, 15.0))
+
+
+# cache-read price as a fraction of input price, per vendor
+CACHE_READ_MULT = {"claude": 0.1, "codex": 0.1, "gemini": 0.25, "other": 0.1}
 
 
 def cost_usd(model, inp, out, cc5, cc1, cr):
     ri, ro = rates_for(model)
-    return (inp * ri + out * ro + cr * ri * 0.1 + cc5 * ri * 1.25 + cc1 * ri * 2.0) / 1e6
+    rm = CACHE_READ_MULT.get(model_source(model), 0.1)
+    # cc5/cc1 (cache-write premium tiers) only occur for Anthropic models
+    return (inp * ri + out * ro + cr * ri * rm + cc5 * ri * 1.25 + cc1 * ri * 2.0) / 1e6
 
 
 # ---------------------------------------------------------------- index / scan
@@ -104,6 +148,37 @@ def _project_name(jsonl_path):
     return name
 
 
+def _cwd_project(cwd):
+    """Normalize a cwd path to claude-style project naming (workspace-rtk)."""
+    if not cwd:
+        return ""
+    try:
+        rel = str(Path(cwd).relative_to(Path.home()))
+    except ValueError:
+        rel = cwd.lstrip("/")
+    return rel.replace("/", "-")
+
+
+def _emit(idx, ts, project, model, inp, out, cc5, cc1, cr, session=""):
+    """Record one usage event into all index aggregates."""
+    if not ts or not model:
+        return
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return
+    day = dt.strftime("%Y-%m-%d")
+    c = cost_usd(model, inp, out, cc5, cc1, cr)
+    _bump(idx["days"].setdefault(day, {}).setdefault(project, {}),
+          model, inp, out, cc5, cc1, cr, c)
+    act = idx["activity"].setdefault(project, {"ts": "", "model": "", "session": ""})
+    if ts > act["ts"]:
+        act.update(ts=ts, model=model, session=session)
+    # ring buffer for live monitoring (pruned to 2h / 500 events on refresh)
+    idx.setdefault("recent", []).append(
+        [ts, project, model, inp, out, cr + cc5 + cc1, round(c, 6)])
+
+
 def _bump(bucket, key, inp, out, cc5, cc1, cr, cost):
     e = bucket.setdefault(key, dict(EMPTY))
     e["in"] += inp
@@ -115,15 +190,16 @@ def _bump(bucket, key, inp, out, cc5, cc1, cr, cost):
     e["cost"] += cost
 
 
-def _scan_file(path, start_offset, last_key, idx):
-    """Parse appended lines of one transcript; returns (new_offset, last_key)."""
+def _scan_claude(path, offset, state, idx):
+    """Claude Code transcript: one JSON event per appended line."""
     project = _project_name(path)
+    last_key = state.get("key", "")
     with open(path, "rb") as f:
-        f.seek(start_offset)
+        f.seek(offset)
         for raw in f:
-            start_offset += len(raw)
+            offset += len(raw)
             if not raw.endswith(b"\n"):  # partial line still being written
-                start_offset -= len(raw)
+                offset -= len(raw)
                 break
             if b'"assistant"' not in raw or b'"usage"' not in raw:
                 continue
@@ -144,31 +220,136 @@ def _scan_file(path, start_offset, last_key, idx):
             if key != "/" and key == last_key:
                 continue
             last_key = key
-            inp = usage.get("input_tokens") or 0
-            out = usage.get("output_tokens") or 0
-            cr = usage.get("cache_read_input_tokens") or 0
             cc = usage.get("cache_creation_input_tokens") or 0
             det = usage.get("cache_creation") or {}
             cc1 = det.get("ephemeral_1h_input_tokens") or 0
             cc5 = det.get("ephemeral_5m_input_tokens") or 0
             if cc5 + cc1 == 0:
                 cc5 = cc
-            ts = d.get("timestamp") or ""
+            _emit(idx, d.get("timestamp") or "", project, model,
+                  usage.get("input_tokens") or 0, usage.get("output_tokens") or 0,
+                  cc5, cc1, usage.get("cache_read_input_tokens") or 0,
+                  session=d.get("sessionId") or path.stem)
+    state["key"] = last_key
+    return offset, state
+
+
+def _scan_codex(path, offset, state, idx):
+    """Codex CLI rollout: token_count events carry cumulative totals."""
+    project = state.get("project", "")
+    model = state.get("model", "gpt")
+    tot = state.get("tot") or {}
+    with open(path, "rb") as f:
+        f.seek(offset)
+        for raw in f:
+            offset += len(raw)
+            if not raw.endswith(b"\n"):
+                offset -= len(raw)
+                break
             try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+                d = json.loads(raw)
             except ValueError:
                 continue
-            day = dt.strftime("%Y-%m-%d")
-            c = cost_usd(model, inp, out, cc5, cc1, cr)
-            _bump(idx["days"].setdefault(day, {}).setdefault(project, {}),
-                  model, inp, out, cc5, cc1, cr, c)
-            act = idx["activity"].setdefault(project, {"ts": "", "model": "", "session": ""})
-            if ts > act["ts"]:
-                act.update(ts=ts, model=model, session=d.get("sessionId") or path.stem)
-            # ring buffer for live monitoring (pruned to 2h / 500 events on refresh)
-            idx.setdefault("recent", []).append(
-                [ts, project, model, inp, out, cr + cc5 + cc1, round(c, 6)])
-    return start_offset, last_key
+            t, p = d.get("type"), d.get("payload") or {}
+            if t == "session_meta":
+                project = _cwd_project(p.get("cwd")) or project
+            elif t == "turn_context":
+                model = p.get("model") or model
+                if p.get("cwd"):
+                    project = _cwd_project(p["cwd"])
+            elif t == "event_msg" and p.get("type") == "token_count":
+                info = p.get("info") or {}
+                cur = info.get("total_token_usage") or {}
+                if not cur:
+                    continue
+                din = (cur.get("input_tokens") or 0) - (tot.get("input_tokens") or 0)
+                dout = (cur.get("output_tokens") or 0) - (tot.get("output_tokens") or 0)
+                dcr = (cur.get("cached_input_tokens") or 0) - (tot.get("cached_input_tokens") or 0)
+                if din < 0 or dout < 0:  # counter reset: fall back to last-turn usage
+                    last = info.get("last_token_usage") or {}
+                    din = last.get("input_tokens") or 0
+                    dout = last.get("output_tokens") or 0
+                    dcr = last.get("cached_input_tokens") or 0
+                tot = cur
+                if din <= 0 and dout <= 0:  # duplicate emission
+                    continue
+                # input_tokens includes cached_input_tokens
+                _emit(idx, d.get("timestamp") or "", project or "codex", model,
+                      max(0, din - dcr), dout, 0, 0, max(0, dcr),
+                      session=path.stem)
+    state.update(project=project, model=model, tot=tot)
+    return offset, state
+
+
+def _gemini_event(idx, m, project, fallback_ts, session):
+    tk = m.get("tokens") or {}
+    model = m.get("model") or ""
+    if not tk or not model:
+        return
+    inp = (tk.get("input") or 0) + (tk.get("tool") or 0)
+    cr = tk.get("cached") or 0
+    out = (tk.get("output") or 0) + (tk.get("thoughts") or 0)
+    # input includes cached tokens
+    _emit(idx, m.get("timestamp") or fallback_ts, project, model,
+          max(0, inp - cr), out, 0, 0, cr, session=session)
+
+
+def _scan_gemini_jsonl(path, offset, state, idx):
+    """Gemini CLI chat (.jsonl): header line then one message per line."""
+    project = path.relative_to(GEMINI_TMP).parts[0]
+    with open(path, "rb") as f:
+        f.seek(offset)
+        for raw in f:
+            offset += len(raw)
+            if not raw.endswith(b"\n"):
+                offset -= len(raw)
+                break
+            if b'"tokens"' not in raw:
+                continue
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                continue
+            _gemini_event(idx, d, project, "", path.stem)
+    return offset, state
+
+
+def _scan_gemini_json(path, state, idx):
+    """Gemini CLI chat (.json): whole-document file, messages appended over time."""
+    project = path.relative_to(GEMINI_TMP).parts[0]
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return state
+    msgs = doc.get("messages") or []
+    n = state.get("n", 0)
+    for m in msgs[n:]:
+        _gemini_event(idx, m, project, doc.get("lastUpdated") or "",
+                      doc.get("sessionId") or path.stem)
+    state["n"] = len(msgs)
+    return state
+
+
+def _discover():
+    """All usage files across supported tools: (path, kind)."""
+    files = []
+    if CLAUDE_PROJECTS.is_dir():
+        for p in sorted(CLAUDE_PROJECTS.glob("*/*.jsonl")):
+            files.append((p, "claude"))
+    if CODEX_SESSIONS.is_dir():
+        for p in sorted(CODEX_SESSIONS.rglob("rollout-*.jsonl")):
+            files.append((p, "codex"))
+    if GEMINI_TMP.is_dir():
+        for proj in sorted(GEMINI_TMP.iterdir()):
+            chats = proj / "chats"
+            if not chats.is_dir():
+                continue
+            for p in sorted(chats.rglob("*.json")):
+                files.append((p, "gemini-json"))
+            for p in sorted(chats.rglob("*.jsonl")):
+                files.append((p, "gemini-jsonl"))
+    return files
 
 
 def refresh_index(force=False):
@@ -179,7 +360,7 @@ def refresh_index(force=False):
             idx = _empty_index()
         changed = False
         seen = set()
-        for path in sorted(CLAUDE_PROJECTS.glob("*/*.jsonl")):
+        for path, kind in _discover():
             try:
                 st = path.stat()
             except OSError:
@@ -189,17 +370,28 @@ def refresh_index(force=False):
             rec = idx["files"].get(p)
             if rec and rec["size"] == st.st_size and rec["mtime"] == st.st_mtime:
                 continue
-            if rec and st.st_size < rec["offset"]:
+            append_only = kind in ("claude", "codex", "gemini-jsonl")
+            if rec and append_only and st.st_size < rec.get("offset", 0):
                 # truncated file: aggregates can't be subtracted — full rebuild
                 return refresh_index(force=True)
-            offset = rec["offset"] if rec else 0
-            last_key = rec["key"] if rec else ""
+            offset = rec.get("offset", 0) if rec else 0
+            state = (rec.get("state") if rec else None) or {}
+            if rec and rec.get("key") and "key" not in state:
+                state["key"] = rec["key"]  # migrate v2 claude cursor
             try:
-                offset, last_key = _scan_file(path, offset, last_key, idx)
+                if kind == "claude":
+                    offset, state = _scan_claude(path, offset, state, idx)
+                elif kind == "codex":
+                    offset, state = _scan_codex(path, offset, state, idx)
+                elif kind == "gemini-jsonl":
+                    offset, state = _scan_gemini_jsonl(path, offset, state, idx)
+                else:  # gemini-json: whole-document parse, cursor is message count
+                    state = _scan_gemini_json(path, state, idx)
+                    offset = st.st_size
             except OSError:
                 continue
             idx["files"][p] = {"size": st.st_size, "mtime": st.st_mtime,
-                               "offset": offset, "key": last_key}
+                               "offset": offset, "kind": kind, "state": state}
             changed = True
         gone = [p for p in idx["files"] if p not in seen]
         for p in gone:
@@ -232,7 +424,7 @@ def _acc(bucket, key, e):
         t[k] += e[k]
 
 
-def _agg(idx, days, project=None, model=None):
+def _agg(idx, days, project=None, model=None, source=None):
     """Aggregate the day->project->model index with optional filters."""
     cutoff = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
     daily, by_model, by_project = [], {}, {}
@@ -246,6 +438,8 @@ def _agg(idx, days, project=None, model=None):
                 continue
             for mdl, e in models.items():
                 if model and mdl != model:
+                    continue
+                if source and model_source(mdl) != source:
                     continue
                 _acc(day_models, mdl, e)
                 _acc(by_model, mdl, e)
@@ -309,16 +503,18 @@ def rtk_gain():
     return None
 
 
-def build_summary(idx, project=None, model=None, days=30):
+def build_summary(idx, project=None, model=None, days=30, source=None):
     now = datetime.now().astimezone()
     today = now.strftime("%Y-%m-%d")
-    daily, by_model, by_project, total = _agg(idx, days, project, model)
+    daily, by_model, by_project, total = _agg(idx, days, project, model, source)
     today_models = {}
     for prj, models in idx["days"].get(today, {}).items():
         if project and prj != project:
             continue
         for mdl, e in models.items():
             if model and mdl != model:
+                continue
+            if source and model_source(mdl) != source:
                 continue
             _acc(today_models, mdl, e)
     today_tot = _sum(today_models.values())
@@ -327,6 +523,8 @@ def build_summary(idx, project=None, model=None, days=30):
         if project and prj != project:
             continue
         if model and act.get("model") != model:
+            continue
+        if source and model_source(act.get("model") or "") != source:
             continue
         try:
             ts = datetime.fromisoformat(act["ts"].replace("Z", "+00:00"))
@@ -341,7 +539,8 @@ def build_summary(idx, project=None, model=None, days=30):
     ev = sorted((r for r in idx.get("recent", [])
                  if r[0] >= cut60
                  and (not project or r[1] == project)
-                 and (not model or r[2] == model)),
+                 and (not model or r[2] == model)
+                 and (not source or model_source(r[2]) == source)),
                 key=lambda r: r[0], reverse=True)
     feed = [{"ts": r[0], "project": r[1], "model": r[2], "out": r[4], "cost": r[6]}
             for r in ev[:30]]
@@ -363,9 +562,11 @@ def build_summary(idx, project=None, model=None, days=30):
     all_projects = sorted({p for d in idx["days"].values() for p in d})
     all_models = sorted({m for d in idx["days"].values()
                          for ms in d.values() for m in ms})
+    all_sources = sorted({model_source(m) for m in all_models})
     return {
         "generated_at": now.isoformat(timespec="seconds"),
-        "filter": {"project": project or "", "model": model or "", "days": days},
+        "filter": {"project": project or "", "model": model or "",
+                   "days": days, "source": source or ""},
         "today": {**today_tot, "models": today_models},
         "window": total,
         "daily": daily,
@@ -378,6 +579,7 @@ def build_summary(idx, project=None, model=None, days=30):
         "minutely": minutely,
         "projects": all_projects,
         "models": all_models,
+        "sources": all_sources,
         "fx": dict(zip(("thb", "src"), fx_thb())),
         "rtk": rtk_gain(),
     }
@@ -465,20 +667,16 @@ def cmd_report(days):
 # ---------------------------------------------------------------- web server
 
 def _fs_state():
-    """Cheap change detector: (file count, total size, max mtime)."""
+    """Cheap change detector across all tools: (file count, total size, max mtime)."""
     n = total = newest = 0
-    try:
-        for d in os.scandir(CLAUDE_PROJECTS):
-            if not d.is_dir():
-                continue
-            for f in os.scandir(d.path):
-                if f.name.endswith(".jsonl"):
-                    st = f.stat()
-                    n += 1
-                    total += st.st_size
-                    newest = max(newest, st.st_mtime)
-    except OSError:
-        pass
+    for path, _ in _discover():
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        n += 1
+        total += st.st_size
+        newest = max(newest, st.st_mtime)
     return (n, total, newest)
 
 
@@ -502,6 +700,7 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(parsed.query)
         project = (q.get("project") or [""])[0] or None
         model = (q.get("model") or [""])[0] or None
+        source = (q.get("source") or [""])[0] or None
         try:
             days = max(1, min(KEEP_DAYS, int((q.get("days") or ["30"])[0])))
         except ValueError:
@@ -514,7 +713,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", body)
         elif route == "/api/summary":
             idx, _ = refresh_index()
-            body = json.dumps(build_summary(idx, project, model, days)).encode()
+            body = json.dumps(build_summary(idx, project, model, days, source)).encode()
             self._send(200, "application/json", body)
         elif route == "/events":
             self.send_response(200)
@@ -529,7 +728,7 @@ class Handler(BaseHTTPRequestHandler):
                     if state != last_state:
                         last_state = state
                         idx, _ = refresh_index()
-                        payload = json.dumps(build_summary(idx, project, model, days))
+                        payload = json.dumps(build_summary(idx, project, model, days, source))
                         self.wfile.write(f"data: {payload}\n\n".encode())
                         self.wfile.flush()
                     elif time.time() - last_beat > 15:

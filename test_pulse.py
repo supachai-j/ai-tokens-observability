@@ -4,7 +4,6 @@
 Run: python3 -m unittest test_pulse
 """
 import json
-import os
 import sys
 import tempfile
 import threading
@@ -80,6 +79,49 @@ class TestProjectName(unittest.TestCase):
         self.assertTrue(pulse.HOME_PREFIX.endswith("-"))
         expected = str(Path.home()).replace("/", "-") + "-"
         self.assertEqual(pulse.HOME_PREFIX, expected)
+
+
+# ---------------------------------------------------------------------------
+# 0b. rtk_gain() cache — None-result path doesn't re-spawn every SSE refresh
+# ---------------------------------------------------------------------------
+
+class TestRtkGainCache(unittest.TestCase):
+    def setUp(self):
+        # Reset module-level memo before each test
+        pulse._rtk_mem["ts"] = 0.0
+        pulse._rtk_mem["data"] = None
+
+    def tearDown(self):
+        pulse._rtk_mem["ts"] = 0.0
+        pulse._rtk_mem["data"] = None
+
+    def test_second_call_within_ttl_skips_subprocess(self):
+        """After one call, a second call within RTK_TTL must not invoke subprocess."""
+        with patch("pulse.subprocess.run") as mock_run:
+            mock_run.return_value = type("R", (), {"returncode": 1, "stdout": ""})()
+            pulse.rtk_gain()   # first call → subprocess
+            pulse.rtk_gain()   # second call → should hit cache
+            self.assertEqual(mock_run.call_count, 1,
+                             "subprocess.run called more than once within TTL")
+
+    def test_none_result_is_cached(self):
+        """When rtk is absent (returncode != 0), None is returned but cached."""
+        with patch("pulse.subprocess.run") as mock_run:
+            mock_run.return_value = type("R", (), {"returncode": 1, "stdout": ""})()
+            r1 = pulse.rtk_gain()
+            r2 = pulse.rtk_gain()
+            self.assertIsNone(r1)
+            self.assertIsNone(r2)
+            self.assertEqual(mock_run.call_count, 1)
+
+    def test_result_returned_after_ttl(self):
+        """A call after TTL expires re-invokes subprocess."""
+        with patch("pulse.subprocess.run") as mock_run:
+            mock_run.return_value = type("R", (), {"returncode": 1, "stdout": ""})()
+            pulse.rtk_gain()
+            pulse._rtk_mem["ts"] -= pulse.RTK_TTL + 1  # age the cache
+            pulse.rtk_gain()
+            self.assertEqual(mock_run.call_count, 2)
 
 
 # ---------------------------------------------------------------------------

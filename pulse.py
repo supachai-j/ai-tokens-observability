@@ -504,7 +504,7 @@ RTK_TTL = 60  # seconds between rtk subprocess calls
 
 def rtk_gain():
     """Run `rtk gain` and return the summary dict; cached for RTK_TTL seconds."""
-    if _rtk_mem["data"] is not None and time.time() - _rtk_mem["ts"] < RTK_TTL:
+    if _rtk_mem["ts"] and time.time() - _rtk_mem["ts"] < RTK_TTL:
         return _rtk_mem["data"]
     data = None
     try:

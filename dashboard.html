@@ -237,6 +237,11 @@
 </div>
 
 <div class="panel" style="margin-bottom:12px">
+  <h2>Long-term trend · <span class="tag">daily cost · all tools · all projects (global, unfiltered)</span></h2>
+  <canvas id="chart-history"></canvas>
+</div>
+
+<div class="panel" style="margin-bottom:12px">
   <h2>Tracing <span class="tag">prompts · tool calls · MCP · token usage per call</span></h2>
   <div class="trace-bar">
     <select id="tr-session"><option value="">loading sessions…</option></select>
@@ -301,12 +306,28 @@ const rateChart = new Chart($('chart-rate'), {
               y: { ticks: { callback: tok } } }
   }
 });
+const historyChart = new Chart($('chart-history'), {
+  type: 'line',
+  data: { labels: [], datasets: [{
+    label: 'daily cost',
+    data: [], borderWidth: 1.5, pointRadius: 2,
+    fill: false, tension: 0.3,
+  }]},
+  options: {
+    responsive: true, animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { grid: { display: false }, ticks: { maxTicksLimit: 24, autoSkip: true } },
+      y: { ticks: { callback: v => sym() + v } }
+    }
+  }
+});
 
 function applyChartTheme() {
   const dim = cssVar('--dim'), border = cssVar('--border');
   Chart.defaults.color = dim;
   Chart.defaults.borderColor = border;
-  for (const c of [dailyChart, modelChart, rateChart]) {
+  for (const c of [dailyChart, modelChart, rateChart, historyChart]) {
     c.options.scales?.x && (c.options.scales.x.ticks.color = dim);
     c.options.scales?.y && (c.options.scales.y.ticks.color = dim,
                             c.options.scales.y.grid.color = border);
@@ -315,6 +336,7 @@ function applyChartTheme() {
   rateChart.data.datasets[0].backgroundColor = cssVar('--accent');
   if (lastSummary) render(lastSummary); else
     [dailyChart, modelChart, rateChart].forEach(c => c.update());
+  if (lastHistory) renderHistory(lastHistory); else historyChart.update();
 }
 
 let lastSummary = null;
@@ -446,6 +468,28 @@ function render(s) {
       new Date(s.generated_at).toLocaleTimeString();
 }
 
+// ---- long-term history chart ----
+let lastHistory = null;
+
+function renderHistory(data) {
+  lastHistory = data;
+  const col = cssVar('--accent');
+  historyChart.data.labels = data.map(d => d.date.slice(5));
+  historyChart.data.datasets[0].data = data.map(d => +(d.cost * rate()).toFixed(2));
+  historyChart.data.datasets[0].label = sym() + ' daily cost';
+  historyChart.data.datasets[0].borderColor = col;
+  historyChart.data.datasets[0].pointBackgroundColor = col;
+  historyChart.data.datasets[0].backgroundColor = 'transparent';
+  historyChart.options.scales.y.ticks.callback = v => sym() + v;
+  historyChart.update();
+}
+
+function loadHistory() {
+  fetch('/api/history').then(r => r.json()).then(data => {
+    renderHistory(data);
+  }).catch(() => {});
+}
+
 // theme toggle
 (function() {
   const btn = $('theme-toggle');
@@ -572,11 +616,13 @@ $('f-cur').addEventListener('change', () => {
   cur = $('f-cur').value;
   try { localStorage.setItem('currency', cur); } catch (e) {}
   if (lastSummary) render(lastSummary);
+  if (lastHistory) renderHistory(lastHistory);
 });
 $('f-cur').value = cur;
 $('f-live').checked = liveOn;
 $('live-row').classList.toggle('hidden', !liveOn);
 applyFilters();
+loadHistory();
 </script>
 </body>
 </html>

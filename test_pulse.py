@@ -876,9 +876,12 @@ class TestSaveSnapshotPruning(unittest.TestCase):
     def test_old_entries_pruned(self):
         from datetime import datetime, timedelta
         today = datetime.now()
-        old = (today - timedelta(days=pulse.KEEP_DAYS + 10)).strftime("%Y-%m-%d")
+        old = (today - timedelta(days=pulse.HISTORY_KEEP_DAYS + 10)).strftime("%Y-%m-%d")
         recent = (today - timedelta(days=5)).strftime("%Y-%m-%d")
-        hist = self._write_history([old, recent])
+        # An entry older than KEEP_DAYS (90d) but within HISTORY_KEEP_DAYS (730d)
+        # must be RETAINED — history is long-term and outlives the index window.
+        mid = (today - timedelta(days=pulse.KEEP_DAYS + 10)).strftime("%Y-%m-%d")
+        hist = self._write_history([old, mid, recent])
 
         idx = pulse._empty_index()
         idx["days"][today.strftime("%Y-%m-%d")] = {
@@ -894,7 +897,10 @@ class TestSaveSnapshotPruning(unittest.TestCase):
 
         lines = [json.loads(l) for l in hist.read_text().splitlines() if l.strip()]
         dates = [l["date"] for l in lines]
-        self.assertNotIn(old, dates, "entry older than KEEP_DAYS should be pruned")
+        self.assertNotIn(old, dates,
+                         "entry older than HISTORY_KEEP_DAYS should be pruned")
+        self.assertIn(mid, dates,
+                      "entry older than KEEP_DAYS but within HISTORY_KEEP_DAYS must be retained")
         self.assertIn(recent, dates, "recent entry should be kept")
 
     def test_empty_history_safe(self):
@@ -1231,6 +1237,124 @@ class TestFxThbEnvOverride(unittest.TestCase):
         # Should return the memo value (not env, not network)
         self.assertAlmostEqual(rate, 31.0)
         self.assertNotEqual(src, "env")
+
+
+# ---------------------------------------------------------------------------
+# TestReadHistory
+# ---------------------------------------------------------------------------
+
+class TestReadHistory(unittest.TestCase):
+    """read_history: dedupe per date, ascending, tolerates bad lines, max_days."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.hist_file = Path(self.tmp.name) / "history.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _line(self, date, cost=1.0, out=100, n=1, cache_hit_rate=0.2,
+              last30_cost=5.0, rtk_saved=None, ts=None):
+        return {
+            "ts": ts or (date + "T12:00:00"),
+            "date": date,
+            "today": {"cost": cost, "out": out, "in": 50,
+                      "cr": 10, "cc5": 0, "cc1": 0, "n": n},
+            "last30_cost": last30_cost,
+            "cache_hit_rate": cache_hit_rate,
+            "rtk_saved": rtk_saved,
+        }
+
+    def _write(self, lines):
+        with open(self.hist_file, "w") as f:
+            for obj in lines:
+                f.write(json.dumps(obj) + "\n")
+
+    def test_empty_file_returns_empty(self):
+        self.hist_file.write_text("")
+        with patch("pulse.HISTORY_FILE", self.hist_file):
+            self.assertEqual(pulse.read_history(), [])
+
+    def test_missing_file_returns_empty(self):
+        with patch("pulse.HISTORY_FILE", self.hist_file):
+            self.assertEqual(pulse.read_history(), [])
+
+    def test_ascending_order(self):
+        self._write([
+            self._line("2026-01-03"),
+            self._line("2026-01-01"),
+            self._line("2026-01-02"),
+        ])
+        with patch("pulse.HISTORY_FILE", self.hist_file):
+            result = pulse.read_history()
+        dates = [r["date"] for r in result]
+        self.assertEqual(dates, sorted(dates))
+
+    def test_dedupe_last_wins(self):
+        """Two snapshots for the same date — the last line's values win."""
+        self._write([
+            self._line("2026-01-01", cost=1.0),
+            self._line("2026-01-01", cost=9.99),
+        ])
+        with patch("pulse.HISTORY_FILE", self.hist_file):
+            result = pulse.read_history()
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result[0]["cost"], 9.99)
+
+    def test_malformed_line_skipped(self):
+        """Lines that are not valid JSON are silently skipped."""
+        with open(self.hist_file, "w") as f:
+            f.write("not valid json\n")
+            f.write(json.dumps(self._line("2026-01-01")) + "\n")
+        with patch("pulse.HISTORY_FILE", self.hist_file):
+            result = pulse.read_history()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["date"], "2026-01-01")
+
+    def test_ts_fallback_when_no_date_field(self):
+        """When 'date' is absent, ts[:10] is used as the date."""
+        obj = {
+            "ts": "2026-02-15T10:00:00",
+            "today": {"cost": 2.0, "out": 50, "in": 20,
+                      "cr": 5, "cc5": 0, "cc1": 0, "n": 1},
+            "last30_cost": 3.0,
+            "cache_hit_rate": 0.1,
+            "rtk_saved": None,
+        }
+        self.hist_file.write_text(json.dumps(obj) + "\n")
+        with patch("pulse.HISTORY_FILE", self.hist_file):
+            result = pulse.read_history()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["date"], "2026-02-15")
+
+    def test_max_days_truncation(self):
+        """Only dates within the last max_days calendar days are returned."""
+        from datetime import datetime as _dt, timedelta as _td
+        today = _dt.now()
+        lines = [(today - _td(days=14 - i)).strftime("%Y-%m-%d") for i in range(15)]
+        self._write([self._line(d) for d in lines])
+        with patch("pulse.HISTORY_FILE", self.hist_file):
+            result = pulse.read_history(max_days=5)
+        self.assertLessEqual(len(result), 5)
+        if result:
+            cutoff = (today - _td(days=4)).strftime("%Y-%m-%d")
+            self.assertGreaterEqual(result[0]["date"], cutoff)
+
+    def test_in_field_sums_all_input_types(self):
+        """'in' field = in + cr + cc5 + cc1 from the today sub-object."""
+        obj = {
+            "ts": "2026-03-01T08:00:00",
+            "date": "2026-03-01",
+            "today": {"cost": 1.0, "out": 100, "in": 200,
+                      "cr": 50, "cc5": 30, "cc1": 20, "n": 1},
+            "last30_cost": 5.0,
+            "cache_hit_rate": 0.3,
+            "rtk_saved": None,
+        }
+        self.hist_file.write_text(json.dumps(obj) + "\n")
+        with patch("pulse.HISTORY_FILE", self.hist_file):
+            result = pulse.read_history()
+        self.assertEqual(result[0]["in"], 300)  # 200 + 50 + 30 + 20
 
 
 if __name__ == "__main__":

@@ -135,6 +135,7 @@ the frontend so switching USD/THB is instant.
 | `GET /events?project=&model=&source=&days=` | SSE stream of filtered summaries |
 | `GET /api/sessions?project=&source=` | recent sessions across tools (newest first) |
 | `GET /api/trace?path=` | full trace of one session: prompts, assistant/thinking text, tool + MCP calls, tool results, per-call usage/cost. `path` must exactly match a discovered session file — anything else is rejected (no traversal). Traces are built on demand from the raw session file, not from the index; capped at the last N steps (default 600, configurable via `RTK_PULSE_TRACE_MAX`, min 50). |
+| `GET /api/history` | parsed `history.jsonl` as a JSON array — one object per calendar day (deduped, ascending). Per-day keys: `date`, `cost`, `out`, `in` (total input incl. cache), `n`, `cache_hit_rate`, `last30_cost`, `rtk_saved`. Global/unfiltered; serves the long-term trend panel. |
 
 The SSE loop polls a cheap filesystem fingerprint (file count + total size +
 max mtime over the transcript tree) every 3 s; only when it changes does it
@@ -147,8 +148,12 @@ the stream whenever filters change.
 
 Append-only daily rollups (today's totals, 30-d cost, cache hit rate, rtk
 saved). Written on `serve` start, every 30 min while serving, and on demand
-via `pulse.py save` (e.g. from a Claude Code `SessionEnd` hook). This is the
-durable record that outlives the 90-day index window.
+via `pulse.py save` (e.g. from a Claude Code `SessionEnd` hook). History is
+pruned to `HISTORY_KEEP_DAYS` (~2 years), which is intentionally longer than
+the 90-day index window — this makes it the only durable long-term record.
+`read_history()` parses the file, dedupes to one record per calendar day
+(last snapshot of the day wins), and is served by `GET /api/history` to
+power the long-term daily-cost trend panel in the dashboard.
 
 ### 7. FX resolver (`fx_thb`)
 
@@ -202,5 +207,5 @@ Claude Code appends to a transcript
   refreshed (2-h ring buffer); it is not a full historical event log.
 - Single-user, single-host by design. A multi-host setup would ship
   snapshots somewhere central rather than exposing the server.
-- `history.jsonl` is collected but not yet visualized — a long-term trend
-  page is a natural next step.
+- `history.jsonl` stores up to ~2 years of daily snapshots and is visualized
+  as a long-term daily-cost trend line in the dashboard.

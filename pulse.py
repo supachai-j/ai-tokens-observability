@@ -38,6 +38,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PORT = 8377
 LIVE_WINDOW_MIN = 10  # a project counts as "live" if active within this many minutes
 KEEP_DAYS = 90
+HISTORY_KEEP_DAYS = 730  # history.jsonl is pruned to ~2 yr, outliving the 90-day index
 
 # Claude stores projects as directory names that replace "/" with "-" and strip
 # the leading "/".  On a typical macOS/Linux install the home directory itself
@@ -892,8 +893,8 @@ def save_snapshot(summary=None):
     }
     with open(HISTORY_FILE, "a") as f:
         f.write(json.dumps(line, separators=(",", ":")) + "\n")
-    # Prune history to KEEP_DAYS so the file doesn't grow unbounded.
-    cutoff = (datetime.now() - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d")
+    # Prune history to HISTORY_KEEP_DAYS (~2yr) so the file doesn't grow unbounded.
+    cutoff = (datetime.now() - timedelta(days=HISTORY_KEEP_DAYS)).strftime("%Y-%m-%d")
     try:
         with open(HISTORY_FILE) as f:
             entries = f.readlines()
@@ -914,6 +915,47 @@ def _history_date(line):
         return json.loads(line).get("date", "")
     except ValueError:
         return ""
+
+
+def read_history(max_days=None):
+    """Parse history.jsonl; dedupe to one record per calendar date (last wins);
+    return ascending list. Tolerates malformed lines and missing/empty file.
+
+    Per-day dict keys: date, cost, out, in (total incl. cache), n,
+    cache_hit_rate, last30_cost, rtk_saved.
+    """
+    if max_days is None:
+        max_days = HISTORY_KEEP_DAYS
+    cutoff = (datetime.now() - timedelta(days=max_days - 1)).strftime("%Y-%m-%d")
+    by_date = {}
+    try:
+        with open(HISTORY_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                date = rec.get("date") or (rec.get("ts") or "")[:10]
+                if not date or date < cutoff:
+                    continue
+                today = rec.get("today") or {}
+                by_date[date] = {
+                    "date": date,
+                    "cost": today.get("cost") or 0.0,
+                    "out": today.get("out") or 0,
+                    "in": ((today.get("in") or 0) + (today.get("cr") or 0) +
+                           (today.get("cc5") or 0) + (today.get("cc1") or 0)),
+                    "n": today.get("n") or 0,
+                    "cache_hit_rate": rec.get("cache_hit_rate") or 0.0,
+                    "last30_cost": rec.get("last30_cost") or 0.0,
+                    "rtk_saved": rec.get("rtk_saved"),
+                }
+    except OSError:
+        return []
+    return sorted(by_date.values(), key=lambda x: x["date"])
 
 
 # ---------------------------------------------------------------- terminal report
@@ -1034,6 +1076,9 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/trace":
             path_str = (q.get("path") or [""])[0]
             body = json.dumps(build_trace(path_str)).encode()
+            self._send(200, "application/json", body)
+        elif route == "/api/history":
+            body = json.dumps(read_history()).encode()
             self._send(200, "application/json", body)
         elif route == "/events":
             self.send_response(200)

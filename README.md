@@ -26,6 +26,8 @@ rtk saved:  ██████████████░░░░░░░░�
   time window (today–90d); light/dark theme; USD/THB currency (live FX rate,
   cached 12h, `RTK_PULSE_THB` override); live monitoring can be toggled
   on/off.
+- **Long-term trend** — a daily cost line chart spanning up to 2 years of
+  saved snapshots, always global (all tools, all projects), currency-aware.
 - **Tracing** — pick any recent session and drill into its full timeline:
   prompts, assistant output, thinking, tool calls, MCP calls (badged
   separately), tool results (errors flagged), and per-API-call token

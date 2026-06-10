@@ -814,6 +814,26 @@ def _trace_gemini(path):
     return steps
 
 
+_codex_project_cache = {}  # path_str → project name; first line is immutable
+
+
+def _codex_project(path_str):
+    """Resolve a codex session's project from its first line (session_meta cwd).
+    Cached by path — the first line is immutable once written.
+    OSError/ValueError are NOT cached so transient failures are retried.
+    """
+    if path_str in _codex_project_cache:
+        return _codex_project_cache[path_str]
+    try:
+        with open(path_str, errors="replace") as f:
+            first = json.loads(f.readline())
+    except (OSError, ValueError):
+        return ""  # don't cache — retry on next call
+    prj = _cwd_project((first.get("payload") or {}).get("cwd") or "")
+    _codex_project_cache[path_str] = prj  # cache success, incl. legit ""
+    return prj
+
+
 def list_sessions(project=None, source=None, limit=25):
     """Recent sessions across all tools, newest first."""
     out = []
@@ -839,12 +859,7 @@ def list_sessions(project=None, source=None, limit=25):
     res = []
     for s in out:
         if s["kind"] == "codex" and not s["project"]:
-            try:
-                with open(s["path"], errors="replace") as f:
-                    first = json.loads(f.readline())
-                s["project"] = _cwd_project((first.get("payload") or {}).get("cwd") or "")
-            except (OSError, ValueError):
-                pass
+            s["project"] = _codex_project(s["path"])
         if project and s["project"] != project:
             continue
         res.append(s)

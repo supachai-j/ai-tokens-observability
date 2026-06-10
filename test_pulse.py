@@ -1243,27 +1243,90 @@ class TestFxThbEnvOverride(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestCodexProjectCache — _codex_project() cache behaviour
+# ---------------------------------------------------------------------------
+
+class TestCodexProjectCache(unittest.TestCase):
+    """_codex_project: path-keyed cache; parse errors not cached; '' cached."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        pulse._codex_project_cache.clear()
+
+    def tearDown(self):
+        pulse._codex_project_cache.clear()
+        self.tmp.cleanup()
+
+    def _write_first_line(self, path, cwd=None):
+        payload = {} if cwd is None else {"cwd": cwd}
+        path.write_text(json.dumps({"type": "session_meta", "payload": payload}) + "\n")
+
+    def test_resolves_project_from_cwd(self):
+        """First-line cwd is normalized to a project name and returned."""
+        p = Path(self.tmp.name) / "rollout-abc.jsonl"
+        self._write_first_line(p, cwd=str(Path.home() / "workspace" / "myproject"))
+        result = pulse._codex_project(str(p))
+        self.assertEqual(result, "workspace-myproject")
+
+    def test_cache_hit_avoids_reread(self):
+        """After first resolve, overwriting the file does not change the result."""
+        p = Path(self.tmp.name) / "rollout-orig.jsonl"
+        self._write_first_line(p, cwd=str(Path.home() / "workspace" / "original"))
+        first = pulse._codex_project(str(p))
+        # Overwrite with a different cwd — cache must shield us from the re-read.
+        self._write_first_line(p, cwd=str(Path.home() / "workspace" / "changed"))
+        second = pulse._codex_project(str(p))
+        self.assertEqual(first, "workspace-original")
+        self.assertEqual(second, "workspace-original",
+                         "cache hit should return original value, not re-read file")
+
+    def test_missing_path_not_cached(self):
+        """OSError on open → '' returned but cache stays empty (will retry)."""
+        missing = str(Path(self.tmp.name) / "no-such-file.jsonl")
+        result = pulse._codex_project(missing)
+        self.assertEqual(result, "")
+        self.assertNotIn(missing, pulse._codex_project_cache,
+                         "failed resolution must NOT be cached so it retries next call")
+
+    def test_no_cwd_cached_as_empty_string(self):
+        """First line with no cwd → '' is cached (legitimate resolved value)."""
+        p = Path(self.tmp.name) / "rollout-nocwd.jsonl"
+        self._write_first_line(p, cwd=None)
+        result = pulse._codex_project(str(p))
+        self.assertEqual(result, "")
+        self.assertIn(str(p), pulse._codex_project_cache,
+                      "successful resolve of '' must be cached to avoid repeated opens")
+
+
+# ---------------------------------------------------------------------------
 # TestHttpRoutes — live ThreadingHTTPServer on port 0, hermetic patches
 # ---------------------------------------------------------------------------
 
 class TestHttpRoutes(unittest.TestCase):
     """Boot a real ThreadingHTTPServer on an OS-assigned port; hit every route."""
 
-    _HIST_ROWS = [
-        {"date": "2026-01-01", "ts": "2026-01-01T12:00:00",
-         "today": {"cost": 2.22, "out": 100, "in": 50, "cr": 0, "cc5": 0, "cc1": 0, "n": 1},
-         "cache_hit_rate": 0.2, "last30_cost": 5.0, "rtk_saved": None},
-        {"date": "2026-01-02", "ts": "2026-01-02T12:00:00",
-         "today": {"cost": 3.33, "out": 200, "in": 80, "cr": 0, "cc5": 0, "cc1": 0, "n": 2},
-         "cache_hit_rate": 0.3, "last30_cost": 6.0, "rtk_saved": None},
-    ]
+    @staticmethod
+    def _reldate(days_ago):
+        from datetime import datetime as _dt, timedelta as _td
+        return (_dt.now() - _td(days=days_ago)).strftime("%Y-%m-%d")
 
     def setUp(self):
+        # Seed history rows using relative dates so they always fall within the
+        # 730-day default window of read_history().
+        d1, d2 = self._reldate(2), self._reldate(1)
+        hist_rows = [
+            {"date": d1, "ts": d1 + "T12:00:00",
+             "today": {"cost": 2.22, "out": 100, "in": 50, "cr": 0, "cc5": 0, "cc1": 0, "n": 1},
+             "cache_hit_rate": 0.2, "last30_cost": 5.0, "rtk_saved": None},
+            {"date": d2, "ts": d2 + "T12:00:00",
+             "today": {"cost": 3.33, "out": 200, "in": 80, "cr": 0, "cc5": 0, "cc1": 0, "n": 2},
+             "cache_hit_rate": 0.3, "last30_cost": 6.0, "rtk_saved": None},
+        ]
         self.tmp = tempfile.TemporaryDirectory()
         data_dir = Path(self.tmp.name)
         hist_file = data_dir / "history.jsonl"
         hist_file.write_text(
-            "\n".join(json.dumps(r) for r in self._HIST_ROWS) + "\n"
+            "\n".join(json.dumps(r) for r in hist_rows) + "\n"
         )
         # Patch at module level so the server thread sees them.
         self._patches = [
@@ -1372,6 +1435,11 @@ class TestReadHistory(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    @staticmethod
+    def _reldate(days_ago=0):
+        from datetime import datetime as _dt, timedelta as _td
+        return (_dt.now() - _td(days=days_ago)).strftime("%Y-%m-%d")
+
     def _line(self, date, cost=1.0, out=100, n=1, cache_hit_rate=0.2,
               last30_cost=5.0, rtk_saved=None, ts=None):
         return {
@@ -1399,11 +1467,9 @@ class TestReadHistory(unittest.TestCase):
             self.assertEqual(pulse.read_history(), [])
 
     def test_ascending_order(self):
-        self._write([
-            self._line("2026-01-03"),
-            self._line("2026-01-01"),
-            self._line("2026-01-02"),
-        ])
+        d0, d1, d2 = self._reldate(0), self._reldate(1), self._reldate(2)
+        # Write in non-ascending order; read_history must return ascending.
+        self._write([self._line(d0), self._line(d2), self._line(d1)])
         with patch("pulse.HISTORY_FILE", self.hist_file):
             result = pulse.read_history()
         dates = [r["date"] for r in result]
@@ -1411,10 +1477,8 @@ class TestReadHistory(unittest.TestCase):
 
     def test_dedupe_last_wins(self):
         """Two snapshots for the same date — the last line's values win."""
-        self._write([
-            self._line("2026-01-01", cost=1.0),
-            self._line("2026-01-01", cost=9.99),
-        ])
+        d = self._reldate(0)
+        self._write([self._line(d, cost=1.0), self._line(d, cost=9.99)])
         with patch("pulse.HISTORY_FILE", self.hist_file):
             result = pulse.read_history()
         self.assertEqual(len(result), 1)
@@ -1422,18 +1486,20 @@ class TestReadHistory(unittest.TestCase):
 
     def test_malformed_line_skipped(self):
         """Lines that are not valid JSON are silently skipped."""
+        d = self._reldate(0)
         with open(self.hist_file, "w") as f:
             f.write("not valid json\n")
-            f.write(json.dumps(self._line("2026-01-01")) + "\n")
+            f.write(json.dumps(self._line(d)) + "\n")
         with patch("pulse.HISTORY_FILE", self.hist_file):
             result = pulse.read_history()
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["date"], "2026-01-01")
+        self.assertEqual(result[0]["date"], d)
 
     def test_ts_fallback_when_no_date_field(self):
         """When 'date' is absent, ts[:10] is used as the date."""
+        d = self._reldate(3)
         obj = {
-            "ts": "2026-02-15T10:00:00",
+            "ts": d + "T10:00:00",
             "today": {"cost": 2.0, "out": 50, "in": 20,
                       "cr": 5, "cc5": 0, "cc1": 0, "n": 1},
             "last30_cost": 3.0,
@@ -1444,7 +1510,7 @@ class TestReadHistory(unittest.TestCase):
         with patch("pulse.HISTORY_FILE", self.hist_file):
             result = pulse.read_history()
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["date"], "2026-02-15")
+        self.assertEqual(result[0]["date"], d)
 
     def test_max_days_truncation(self):
         """Only dates within the last max_days calendar days are returned."""
@@ -1461,9 +1527,10 @@ class TestReadHistory(unittest.TestCase):
 
     def test_in_field_sums_all_input_types(self):
         """'in' field = in + cr + cc5 + cc1 from the today sub-object."""
+        d = self._reldate(1)
         obj = {
-            "ts": "2026-03-01T08:00:00",
-            "date": "2026-03-01",
+            "ts": d + "T08:00:00",
+            "date": d,
             "today": {"cost": 1.0, "out": 100, "in": 200,
                       "cr": 50, "cc5": 30, "cc1": 20, "n": 1},
             "last30_cost": 5.0,

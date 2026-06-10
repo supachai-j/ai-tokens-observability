@@ -516,6 +516,15 @@ def rtk_gain():
     return data
 
 
+def _budget_limit():
+    """Read RTK_PULSE_BUDGET env var → float USD/month, or None if unset/invalid."""
+    try:
+        v = os.environ.get("RTK_PULSE_BUDGET")
+        return float(v) if v else None
+    except (ValueError, TypeError):
+        return None
+
+
 def build_summary(idx, project=None, model=None, days=30, source=None):
     now = datetime.now().astimezone()
     today = now.strftime("%Y-%m-%d")
@@ -576,6 +585,21 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
     all_models = sorted({m for d in idx["days"].values()
                          for ms in d.values() for m in ms})
     all_sources = sorted({model_source(m) for m in all_models})
+    # Monthly spend — independent of the days window; same project/model/source filters
+    current_month = now.strftime("%Y-%m")
+    month_cost = 0.0
+    for day, day_data in idx["days"].items():
+        if day[:7] != current_month:
+            continue
+        for prj, mdls in day_data.items():
+            if project and prj != project:
+                continue
+            for mdl, e in mdls.items():
+                if model and mdl != model:
+                    continue
+                if source and model_source(mdl) != source:
+                    continue
+                month_cost += e["cost"]
     return {
         "generated_at": now.isoformat(timespec="seconds"),
         "filter": {"project": project or "", "model": model or "",
@@ -595,6 +619,8 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
         "sources": all_sources,
         "fx": dict(zip(("thb", "src"), fx_thb())),
         "rtk": rtk_gain(),
+        "budget": {"limit": _budget_limit(), "month_cost": month_cost,
+                   "month": current_month},
     }
 
 

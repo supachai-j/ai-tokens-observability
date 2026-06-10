@@ -186,6 +186,10 @@
     <div class="value" id="c-today-cost">–</div><div class="sub" id="c-today-msgs"></div></div>
   <div class="card"><div class="label" id="l-window">Last 30d · est. cost</div>
     <div class="value" id="c-30d-cost">–</div><div class="sub" id="c-7d-cost"></div></div>
+  <div class="card"><div class="label" id="l-month">This month · est. cost</div>
+    <div class="value" id="c-month-cost">–</div>
+    <div class="sub" id="c-month-budget"></div>
+    <div class="meter"><div id="m-month"></div></div></div>
   <div class="card"><div class="label" id="l-cache">Cache hit rate</div>
     <div class="value" id="c-cache">–</div><div class="meter"><div id="m-cache"></div></div></div>
   <div class="card"><div class="label">rtk tokens saved</div>
@@ -344,6 +348,20 @@ function render(s) {
   $('c-today-msgs').textContent = t.n + ' messages';
   $('c-30d-cost').textContent = usd(m.cost);
   $('c-7d-cost').textContent = m.n + ' messages';
+  if (s.budget) {
+    const b = s.budget;
+    $('l-month').textContent = esc(b.month) + ' · est. cost';
+    $('c-month-cost').textContent = usd(b.month_cost);
+    if (b.limit) {
+      const pct = b.month_cost / b.limit * 100;
+      $('c-month-budget').textContent = 'of ' + sym() + (b.limit * rate()).toFixed(2) + ' · ' + pct.toFixed(1) + '%';
+      $('m-month').style.width = Math.min(100, pct) + '%';
+      $('m-month').style.background = pct > 100 ? cssVar('--red') : pct > 80 ? cssVar('--amber') : cssVar('--green');
+    } else {
+      $('c-month-budget').textContent = 'no budget set';
+      $('m-month').style.width = '0%';
+    }
+  }
   $('c-cache').textContent = (s.cache_hit_rate * 100).toFixed(1) + '%';
   $('m-cache').style.width = (s.cache_hit_rate * 100).toFixed(1) + '%';
   $('m-rtk').style.background = cssVar('--accent');

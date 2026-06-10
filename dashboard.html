@@ -4,20 +4,39 @@
 <meta charset="utf-8">
 <title>rtk-pulse · token usage</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fafbfc" media="(prefers-color-scheme: light)">
+<script>
+  (function() {
+    try {
+      var stored = localStorage.getItem('theme');
+      var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.dataset.theme = theme;
+    } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+  })();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
 <style>
-  :root {
+  :root, [data-theme="dark"] {
     --bg: #0d1117; --panel: #161b22; --border: #21262d;
     --text: #e6edf3; --dim: #8b949e; --accent: #2f81f7;
     --green: #3fb950; --amber: #d29922; --red: #f85149; --purple: #bc8cff;
+    --soft-1: rgba(255,255,255,0.04); --soft-2: rgba(255,255,255,0.08);
+  }
+  [data-theme="light"] {
+    --bg: #fafbfc; --panel: #ffffff; --border: #d8dee6;
+    --text: #1a1d27; --dim: #58607a; --accent: #1f6feb;
+    --green: #1a7f37; --amber: #9a6700; --red: #cf222e; --purple: #8250df;
+    --soft-1: rgba(0,0,0,0.03); --soft-2: rgba(0,0,0,0.07);
   }
   * { box-sizing: border-box; margin: 0; }
   body {
     background: var(--bg); color: var(--text);
     font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     padding: 20px; max-width: 1240px; margin: 0 auto;
+    transition: background-color .25s ease, color .25s ease;
   }
-  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
   h1 { font-size: 20px; letter-spacing: .5px; }
   h1 .pulse { color: var(--accent); }
   #status { color: var(--dim); font-size: 12px; }
@@ -25,10 +44,22 @@
          background: var(--red); margin-right: 5px; vertical-align: 1px; }
   .dot.live { background: var(--green); animation: blink 2s infinite; }
   @keyframes blink { 50% { opacity: .35; } }
+  .theme-toggle {
+    margin-left: auto; background: var(--soft-1); border: 1px solid var(--border);
+    color: var(--dim); width: 34px; height: 34px; border-radius: 8px;
+    display: inline-grid; place-items: center; cursor: pointer; padding: 0;
+    transition: background-color .15s, color .15s, border-color .15s;
+  }
+  .theme-toggle:hover { background: var(--soft-2); color: var(--text); }
+  .theme-toggle svg { width: 16px; height: 16px; display: block; }
+  .theme-toggle .icon-moon { display: none; }
+  [data-theme="light"] .theme-toggle .icon-sun { display: none; }
+  [data-theme="light"] .theme-toggle .icon-moon { display: block; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
            gap: 12px; margin-bottom: 18px; }
   .card { background: var(--panel); border: 1px solid var(--border);
-          border-radius: 8px; padding: 12px 14px; }
+          border-radius: 8px; padding: 12px 14px;
+          transition: background-color .25s ease, border-color .25s ease; }
   .card .label { color: var(--dim); font-size: 11px; text-transform: uppercase;
                  letter-spacing: 1px; margin-bottom: 4px; }
   .card .value { font-size: 22px; font-weight: 600; }
@@ -37,7 +68,8 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
   @media (max-width: 900px) { .grid, .grid2 { grid-template-columns: 1fr; } }
   .panel { background: var(--panel); border: 1px solid var(--border);
-           border-radius: 8px; padding: 14px; }
+           border-radius: 8px; padding: 14px;
+           transition: background-color .25s ease, border-color .25s ease; }
   .panel h2 { font-size: 12px; color: var(--dim); text-transform: uppercase;
               letter-spacing: 1px; margin-bottom: 10px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -45,13 +77,14 @@
        text-transform: uppercase; padding: 4px 8px 6px 0; border-bottom: 1px solid var(--border); }
   td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
   td.num, th.num { text-align: right; }
-  .meter { background: var(--border); border-radius: 4px; height: 8px; overflow: hidden; margin-top: 6px; }
+  .meter { background: var(--soft-2); border-radius: 4px; height: 8px; overflow: hidden; margin-top: 6px; }
   .meter > div { height: 100%; background: var(--green); transition: width .6s; }
-  .tag { color: var(--dim); font-size: 11px; }
+  .tag { color: var(--dim); font-size: 11px; text-transform: none; letter-spacing: 0; }
   #live-list li { list-style: none; padding: 6px 0; border-bottom: 1px solid var(--border); }
   #live-list .prj { color: var(--text); }
   .muted { color: var(--dim); }
   canvas { max-height: 260px; }
+  #feed-wrap { max-height: 280px; overflow-y: auto; }
   footer { color: var(--dim); font-size: 11px; margin-top: 16px; }
 </style>
 </head>
@@ -59,6 +92,21 @@
 <header>
   <h1>rtk-<span class="pulse">pulse</span></h1>
   <span id="status"><span class="dot" id="dot"></span>connecting…</span>
+  <button class="theme-toggle" id="theme-toggle" type="button"
+          aria-label="Toggle dark/light theme" title="Toggle theme">
+    <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="4"/>
+      <path d="M12 2v2"/><path d="M12 20v2"/>
+      <path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/>
+      <path d="M2 12h2"/><path d="M20 12h2"/>
+      <path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/>
+    </svg>
+    <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+  </button>
 </header>
 
 <div class="cards">
@@ -72,7 +120,20 @@
     <div class="value" id="c-cache">–</div><div class="meter"><div id="m-cache"></div></div></div>
   <div class="card"><div class="label">rtk tokens saved</div>
     <div class="value" id="c-rtk">–</div><div class="sub" id="c-rtk-pct"></div>
-    <div class="meter"><div id="m-rtk" style="background:var(--accent)"></div></div></div>
+    <div class="meter"><div id="m-rtk"></div></div></div>
+</div>
+
+<div class="grid">
+  <div class="panel"><h2>Live throughput <span class="tag">output tokens / min · last 30 min</span></h2>
+    <canvas id="chart-rate"></canvas></div>
+  <div class="panel">
+    <h2>Activity feed <span class="tag">last 60 min</span></h2>
+    <div id="feed-wrap">
+    <table id="t-feed"><thead>
+      <tr><th>time</th><th>project</th><th class="num">out</th><th class="num">cost</th></tr>
+    </thead><tbody></tbody></table>
+    </div>
+  </div>
 </div>
 
 <div class="grid">
@@ -102,7 +163,6 @@ snapshots → ~/.config/rtk-pulse/history.jsonl</footer>
 
 <script>
 const $ = id => document.getElementById(id);
-const COLORS = ['#2f81f7','#bc8cff','#3fb950','#d29922','#f85149','#39c5cf','#db61a2','#8b949e'];
 
 function tok(n) {
   if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
@@ -112,9 +172,10 @@ function tok(n) {
 }
 const usd = n => '$' + n.toFixed(2);
 const shortModel = m => m.replace(/^claude-/, '').replace(/-\d{8}.*$/, '');
+const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const palette = () => [cssVar('--accent'), cssVar('--purple'), cssVar('--green'),
+                       cssVar('--amber'), cssVar('--red'), '#39c5cf', '#db61a2', cssVar('--dim')];
 
-Chart.defaults.color = '#8b949e';
-Chart.defaults.borderColor = '#21262d';
 Chart.defaults.font.family = 'ui-monospace, Menlo, monospace';
 
 const dailyChart = new Chart($('chart-daily'), {
@@ -129,12 +190,41 @@ const dailyChart = new Chart($('chart-daily'), {
 });
 const modelChart = new Chart($('chart-model'), {
   type: 'doughnut',
-  data: { labels: [], datasets: [{ data: [], backgroundColor: COLORS, borderWidth: 0 }] },
+  data: { labels: [], datasets: [{ data: [], borderWidth: 0 }] },
   options: { responsive: true, animation: false, cutout: '62%',
              plugins: { legend: { position: 'bottom', labels: { boxWidth: 10 } } } }
 });
+const rateChart = new Chart($('chart-rate'), {
+  type: 'bar',
+  data: { labels: [], datasets: [{ label: 'out tok/min', data: [], borderWidth: 0 }] },
+  options: {
+    responsive: true, animation: false,
+    plugins: { legend: { display: false } },
+    scales: { x: { grid: { display: false }, ticks: { maxTicksToShow: 10, autoSkip: true } },
+              y: { ticks: { callback: tok } } }
+  }
+});
+
+function applyChartTheme() {
+  const dim = cssVar('--dim'), border = cssVar('--border');
+  Chart.defaults.color = dim;
+  Chart.defaults.borderColor = border;
+  for (const c of [dailyChart, modelChart, rateChart]) {
+    c.options.scales?.x && (c.options.scales.x.ticks.color = dim);
+    c.options.scales?.y && (c.options.scales.y.ticks.color = dim,
+                            c.options.scales.y.grid.color = border);
+    c.options.plugins.legend.labels.color = dim;
+  }
+  rateChart.data.datasets[0].backgroundColor = cssVar('--accent');
+  if (lastSummary) render(lastSummary); else
+    [dailyChart, modelChart, rateChart].forEach(c => c.update());
+}
+
+let lastSummary = null;
 
 function render(s) {
+  lastSummary = s;
+  const COLORS = palette();
   const t = s.today, m = s.last30;
   $('c-today-out').textContent = tok(t.out);
   $('c-today-in').textContent = 'in ' + tok(t.in + t.cr + t.cc5 + t.cc1) + ' (incl. cache)';
@@ -144,6 +234,7 @@ function render(s) {
   $('c-7d-cost').textContent = '7d: ' + usd(s.last7.cost);
   $('c-cache').textContent = (s.cache_hit_rate * 100).toFixed(1) + '%';
   $('m-cache').style.width = (s.cache_hit_rate * 100).toFixed(1) + '%';
+  $('m-rtk').style.background = cssVar('--accent');
   if (s.rtk) {
     $('c-rtk').textContent = tok(s.rtk.total_saved || 0);
     const pct = s.rtk.avg_savings_pct || 0;
@@ -153,6 +244,23 @@ function render(s) {
     $('c-rtk').textContent = 'n/a';
     $('c-rtk-pct').textContent = 'rtk not found';
   }
+
+  // live throughput (tokens/min)
+  rateChart.data.labels = s.minutely.map(x => x.t);
+  rateChart.data.datasets[0].data = s.minutely.map(x => x.out);
+  rateChart.data.datasets[0].backgroundColor = cssVar('--accent');
+  rateChart.update();
+
+  // activity feed
+  const ft = $('t-feed').querySelector('tbody');
+  ft.innerHTML = s.feed.length
+    ? s.feed.map(e => {
+        const hhmm = new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const prj = e.project.length > 22 ? '…' + e.project.slice(-21) : e.project;
+        return `<tr><td>${hhmm}</td><td title="${e.project} · ${shortModel(e.model)}">${prj}</td>` +
+               `<td class="num">${tok(e.out)}</td><td class="num">$${e.cost.toFixed(3)}</td></tr>`;
+      }).join('')
+    : '<tr><td class="muted" colspan="4">no activity in the last hour</td></tr>';
 
   // daily stacked bars by model
   const models = Object.keys(s.by_model)
@@ -167,6 +275,7 @@ function render(s) {
 
   modelChart.data.labels = models.map(shortModel);
   modelChart.data.datasets[0].data = models.map(mdl => +s.by_model[mdl].cost.toFixed(2));
+  modelChart.data.datasets[0].backgroundColor = COLORS;
   modelChart.update();
 
   const pt = $('t-projects').querySelector('tbody');
@@ -193,6 +302,27 @@ function render(s) {
   $('status').innerHTML = `<span class="dot live" id="dot"></span>live · updated ` +
     new Date(s.generated_at).toLocaleTimeString();
 }
+
+// theme toggle
+(function() {
+  const btn = $('theme-toggle');
+  btn.addEventListener('click', () => {
+    const next = (document.documentElement.dataset.theme || 'dark') === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('theme', next); } catch (e) {}
+    applyChartTheme();
+  });
+  const mq = window.matchMedia('(prefers-color-scheme: light)');
+  if (mq.addEventListener) {
+    mq.addEventListener('change', e => {
+      if (!localStorage.getItem('theme')) {
+        document.documentElement.dataset.theme = e.matches ? 'light' : 'dark';
+        applyChartTheme();
+      }
+    });
+  }
+})();
+applyChartTheme();
 
 function connect() {
   const es = new EventSource('/events');

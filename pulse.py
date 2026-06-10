@@ -158,6 +158,9 @@ def _scan_file(path, start_offset, last_key, idx):
             act = idx["activity"].setdefault(project, {"ts": "", "model": "", "session": ""})
             if ts > act["ts"]:
                 act.update(ts=ts, model=model, session=d.get("sessionId") or path.stem)
+            # ring buffer for live monitoring (pruned to 2h / 500 events on refresh)
+            idx.setdefault("recent", []).append(
+                [ts, project, model, inp, out, cr + cc5 + cc1, round(c, 6)])
     return start_offset, last_key
 
 
@@ -199,6 +202,9 @@ def refresh_index(force=False):
             for day in [d for d in idx[bucket] if d < cutoff]:
                 del idx[bucket][day]
                 changed = True
+        # transcript timestamps are UTC "...Z" — lexicographic compare works
+        cut2h = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+        idx["recent"] = [r for r in idx.get("recent", []) if r[0] >= cut2h][-500:]
         if changed or force:
             _save_index(idx)
         return idx, changed
@@ -267,6 +273,27 @@ def build_summary(idx):
     live.sort(key=lambda x: x["ts"], reverse=True)
     t30 = w30["total"]
     cache_denom = t30["in"] + t30["cr"] + t30["cc5"] + t30["cc1"]
+    # live monitoring: activity feed + per-minute throughput over the last 60 min
+    cut60 = (datetime.now(timezone.utc) - timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%S")
+    ev = sorted((r for r in idx.get("recent", []) if r[0] >= cut60),
+                key=lambda r: r[0], reverse=True)
+    feed = [{"ts": r[0], "project": r[1], "model": r[2], "out": r[4], "cost": r[6]}
+            for r in ev[:30]]
+    buckets = {}
+    for r in ev:
+        try:
+            dt = datetime.fromisoformat(r[0].replace("Z", "+00:00")).astimezone()
+        except ValueError:
+            continue
+        b = buckets.setdefault(dt.strftime("%H:%M"), {"out": 0, "cost": 0.0, "n": 0})
+        b["out"] += r[4]
+        b["cost"] += r[6]
+        b["n"] += 1
+    start = now - timedelta(minutes=29)
+    minutely = []
+    for i in range(30):
+        label = (start + timedelta(minutes=i)).strftime("%H:%M")
+        minutely.append({"t": label, **buckets.get(label, {"out": 0, "cost": 0.0, "n": 0})})
     return {
         "generated_at": now.isoformat(timespec="seconds"),
         "today": {**today_tot, "models": today_models},
@@ -278,6 +305,8 @@ def build_summary(idx):
                                   key=lambda kv: kv[1]["cost"], reverse=True)[:20]),
         "cache_hit_rate": (t30["cr"] / cache_denom) if cache_denom else 0.0,
         "live_sessions": live[:10],
+        "feed": feed,
+        "minutely": minutely,
         "rtk": rtk_gain(),
     }
 

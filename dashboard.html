@@ -147,6 +147,11 @@
       <option value="14">14d</option><option value="30" selected>30d</option>
       <option value="60">60d</option><option value="90">90d</option>
     </select></label>
+  <label>currency
+    <select id="f-cur">
+      <option value="USD" selected>USD $</option>
+      <option value="THB">THB ฿</option>
+    </select></label>
   <button class="clear" id="f-clear" type="button">× clear filters</button>
   <label class="switch" title="Enable/disable live monitoring">live monitoring
     <input type="checkbox" id="f-live" checked><span class="track"></span></label>
@@ -202,7 +207,7 @@
 </div>
 
 <footer>rtk-pulse · costs are API-list-price estimates from transcript usage (cache write 1.25×/2×, read 0.1×) ·
-snapshots → ~/.config/rtk-pulse/history.jsonl</footer>
+snapshots → ~/.config/rtk-pulse/history.jsonl<span id="fx-note"></span></footer>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -213,7 +218,12 @@ function tok(n) {
   if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
   return String(Math.round(n));
 }
-const usd = n => '$' + n.toFixed(2);
+let cur = (() => { try { return localStorage.getItem('currency') || 'USD'; } catch (e) { return 'USD'; } })();
+let fxTHB = 32, fxSrc = '';
+const rate = () => cur === 'THB' ? fxTHB : 1;
+const sym = () => cur === 'THB' ? '฿' : '$';
+const usd = n => sym() + (n * rate()).toFixed(2);          // window/day-level amounts
+const usd3 = n => sym() + (n * rate()).toFixed(cur === 'THB' ? 2 : 3);  // per-message amounts
 const shortModel = m => m.replace(/^claude-/, '').replace(/-\d{8}.*$/, '');
 const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const palette = () => [cssVar('--accent'), cssVar('--purple'), cssVar('--green'),
@@ -228,7 +238,7 @@ const dailyChart = new Chart($('chart-daily'), {
     responsive: true, animation: false,
     plugins: { legend: { position: 'bottom', labels: { boxWidth: 10 } } },
     scales: { x: { stacked: true, grid: { display: false } },
-              y: { stacked: true, ticks: { callback: v => '$' + v } } }
+              y: { stacked: true, ticks: { callback: v => sym() + v } } }
   }
 });
 const modelChart = new Chart($('chart-model'), {
@@ -277,6 +287,9 @@ function fillSelect(sel, items, current, fmt) {
 
 function render(s) {
   lastSummary = s;
+  if (s.fx && s.fx.thb) { fxTHB = s.fx.thb; fxSrc = s.fx.src; }
+  $('fx-note').textContent = cur === 'THB'
+    ? ` · 1 USD ≈ ฿${fxTHB.toFixed(2)} (${fxSrc})` : '';
   const COLORS = palette();
   const t = s.today, m = s.window;
   const winLabel = s.filter.days === 1 ? 'today' : 'last ' + s.filter.days + 'd';
@@ -318,7 +331,7 @@ function render(s) {
         const hhmm = new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const prj = e.project.length > 22 ? '…' + e.project.slice(-21) : e.project;
         return `<tr><td>${hhmm}</td><td title="${e.project} · ${shortModel(e.model)}">${prj}</td>` +
-               `<td class="num">${tok(e.out)}</td><td class="num">$${e.cost.toFixed(3)}</td></tr>`;
+               `<td class="num">${tok(e.out)}</td><td class="num">${usd3(e.cost)}</td></tr>`;
       }).join('')
     : '<tr><td class="muted" colspan="4">no activity in the last hour</td></tr>';
 
@@ -328,13 +341,13 @@ function render(s) {
   dailyChart.data.labels = s.daily.map(d => d.date.slice(5));
   dailyChart.data.datasets = models.map((mdl, i) => ({
     label: shortModel(mdl),
-    data: s.daily.map(d => +(d.models[mdl]?.cost || 0).toFixed(2)),
+    data: s.daily.map(d => +((d.models[mdl]?.cost || 0) * rate()).toFixed(2)),
     backgroundColor: COLORS[i % COLORS.length]
   }));
   dailyChart.update();
 
   modelChart.data.labels = models.map(shortModel);
-  modelChart.data.datasets[0].data = models.map(mdl => +s.by_model[mdl].cost.toFixed(2));
+  modelChart.data.datasets[0].data = models.map(mdl => +(s.by_model[mdl].cost * rate()).toFixed(2));
   modelChart.data.datasets[0].backgroundColor = COLORS;
   modelChart.update();
 
@@ -432,6 +445,12 @@ $('f-clear').addEventListener('click', () => {
   $('f-project').value = $('f-model').value = '';
   applyFilters();
 });
+$('f-cur').addEventListener('change', () => {
+  cur = $('f-cur').value;
+  try { localStorage.setItem('currency', cur); } catch (e) {}
+  if (lastSummary) render(lastSummary);
+});
+$('f-cur').value = cur;
 $('f-live').checked = liveOn;
 $('live-row').classList.toggle('hidden', !liveOn);
 applyFilters();

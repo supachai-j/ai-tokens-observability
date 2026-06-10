@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import urllib.request
 from urllib.parse import parse_qs, urlparse
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
@@ -255,6 +256,48 @@ def _agg(idx, days, project=None, model=None):
     return daily, by_model, by_project, total
 
 
+FX_FILE = DATA_DIR / "fx.json"
+FX_FALLBACK_THB = 32.0
+FX_TTL = 12 * 3600
+_fx_mem = {"ts": 0.0, "thb": None, "src": ""}
+
+
+def fx_thb():
+    """USD->THB rate: env override > fresh cache > live API > stale cache > fallback."""
+    env = os.environ.get("RTK_PULSE_THB")
+    if env:
+        try:
+            return float(env), "env"
+        except ValueError:
+            pass
+    if _fx_mem["thb"] and time.time() - _fx_mem["ts"] < 600:
+        return _fx_mem["thb"], _fx_mem["src"]
+    disk = None
+    try:
+        with open(FX_FILE) as f:
+            disk = json.load(f)
+        if time.time() - disk.get("ts", 0) < FX_TTL:
+            _fx_mem.update(ts=time.time(), thb=disk["thb"], src="cached")
+            return disk["thb"], "cached"
+    except (OSError, ValueError, KeyError):
+        disk = None
+    try:
+        with urllib.request.urlopen("https://open.er-api.com/v6/latest/USD",
+                                    timeout=5) as r:
+            rate = float(json.load(r)["rates"]["THB"])
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(FX_FILE, "w") as f:
+            json.dump({"ts": time.time(), "thb": rate}, f)
+        _fx_mem.update(ts=time.time(), thb=rate, src="live")
+        return rate, "live"
+    except Exception:
+        if disk and disk.get("thb"):
+            _fx_mem.update(ts=time.time(), thb=disk["thb"], src="stale")
+            return disk["thb"], "stale"
+        _fx_mem.update(ts=time.time(), thb=FX_FALLBACK_THB, src="fallback")
+        return FX_FALLBACK_THB, "fallback"
+
+
 def rtk_gain():
     try:
         out = subprocess.run(["rtk", "gain", "--format", "json"],
@@ -335,6 +378,7 @@ def build_summary(idx, project=None, model=None, days=30):
         "minutely": minutely,
         "projects": all_projects,
         "models": all_models,
+        "fx": dict(zip(("thb", "src"), fx_thb())),
         "rtk": rtk_gain(),
     }
 

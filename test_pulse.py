@@ -3,6 +3,8 @@
 
 Run: python3 -m unittest test_pulse
 """
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -835,6 +837,152 @@ class TestSaveSnapshotPruning(unittest.TestCase):
              patch("pulse.fx_thb", return_value=(32.0, "test")):
             pulse.save_snapshot(pulse.build_summary(idx))
         self.assertTrue(hist.exists())
+
+
+# ---------------------------------------------------------------------------
+# 10. Budget math in build_summary
+# ---------------------------------------------------------------------------
+
+class TestBuildSummaryBudget(unittest.TestCase):
+    def _make_idx_with_months(self):
+        """Index with data in two calendar months."""
+        from datetime import datetime
+        today = datetime.now()
+        this_month = today.strftime("%Y-%m-%d")
+        # Construct a date in the previous month
+        first_of_month = today.replace(day=1)
+        import time as _time
+        prev_ts = _time.mktime(first_of_month.timetuple()) - 86400
+        from datetime import datetime as dt2
+        prev_day = dt2.fromtimestamp(prev_ts).strftime("%Y-%m-%d")
+
+        idx = pulse._empty_index()
+        idx["days"][this_month] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                "n": 1, "cost": 5.0}},
+        }
+        idx["days"][prev_day] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 200, "out": 80, "cc5": 0, "cc1": 0, "cr": 0,
+                "n": 2, "cost": 10.0}},
+        }
+        return idx
+
+    def test_month_cost_only_current_month(self):
+        """month_cost sums only the current YYYY-MM, not previous months."""
+        idx = self._make_idx_with_months()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        self.assertAlmostEqual(s["budget"]["month_cost"], 5.0, places=4)
+
+    def test_month_cost_respects_project_filter(self):
+        """month_cost applies the same project filter as the window."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        idx["days"][today] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                "n": 1, "cost": 3.0}},
+            "projB": {"claude-opus-4-6": {
+                "in": 200, "out": 80, "cc5": 0, "cc1": 0, "cr": 0,
+                "n": 1, "cost": 7.0}},
+        }
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90, project="projA")
+        self.assertAlmostEqual(s["budget"]["month_cost"], 3.0, places=4)
+
+    def test_budget_limit_from_env(self):
+        """budget.limit reflects RTK_PULSE_BUDGET env var."""
+        idx = pulse._empty_index()
+        with patch.dict("os.environ", {"RTK_PULSE_BUDGET": "500"}), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx)
+        self.assertEqual(s["budget"]["limit"], 500.0)
+
+    def test_budget_limit_none_when_unset(self):
+        """budget.limit is None when RTK_PULSE_BUDGET is not set."""
+        idx = pulse._empty_index()
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k != "RTK_PULSE_BUDGET"}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx)
+        self.assertIsNone(s["budget"]["limit"])
+
+    def test_budget_limit_none_on_invalid_env(self):
+        """budget.limit is None (not an exception) when env value is invalid."""
+        idx = pulse._empty_index()
+        with patch.dict("os.environ", {"RTK_PULSE_BUDGET": "not-a-number"}), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx)
+        self.assertIsNone(s["budget"]["limit"])
+
+    def test_budget_month_field(self):
+        """budget.month matches the current YYYY-MM."""
+        from datetime import datetime
+        expected = datetime.now().strftime("%Y-%m")
+        idx = pulse._empty_index()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx)
+        self.assertEqual(s["budget"]["month"], expected)
+
+
+# ---------------------------------------------------------------------------
+# 11. cmd_report smoke test
+# ---------------------------------------------------------------------------
+
+class TestCmdReport(unittest.TestCase):
+    def _make_idx(self):
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        idx["days"][today] = {
+            "workspace-rtk": {
+                "claude-sonnet-4-5": {
+                    "in": 5000, "out": 2000, "cc5": 0, "cc1": 0,
+                    "cr": 1000, "n": 10, "cost": 0.12},
+            },
+            "workspace-test": {
+                "claude-haiku-4-5": {
+                    "in": 1000, "out": 400, "cc5": 0, "cc1": 0,
+                    "cr": 0, "n": 3, "cost": 0.01},
+            },
+        }
+        return idx
+
+    def test_cmd_report_runs_and_contains_sections(self):
+        """cmd_report should complete without raising and include standard sections."""
+        idx = self._make_idx()
+        buf = io.StringIO()
+        with patch("pulse.refresh_index", return_value=(idx, False)), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             contextlib.redirect_stdout(buf):
+            pulse.cmd_report(days=7)
+        out = buf.getvalue()
+        self.assertIn("By Model", out)
+        self.assertIn("By Project", out)
+        self.assertIn("claude-sonnet-4-5", out)
+        self.assertIn("workspace-rtk", out)
+
+    def test_cmd_report_today_line_present(self):
+        """cmd_report always prints a Today: summary line."""
+        idx = self._make_idx()
+        buf = io.StringIO()
+        with patch("pulse.refresh_index", return_value=(idx, False)), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             contextlib.redirect_stdout(buf):
+            pulse.cmd_report(days=30)
+        self.assertIn("Today:", buf.getvalue())
 
 
 if __name__ == "__main__":

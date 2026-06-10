@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 DATA_DIR = Path(os.environ.get("RTK_PULSE_HOME", Path.home() / ".config" / "rtk-pulse"))
@@ -70,15 +71,20 @@ EMPTY = {"in": 0, "out": 0, "cc5": 0, "cc1": 0, "cr": 0, "n": 0, "cost": 0.0}
 _lock = threading.Lock()
 
 
+def _empty_index():
+    # days is day -> project -> model -> entry (enables any filter combination)
+    return {"version": 2, "files": {}, "days": {}, "activity": {}, "recent": []}
+
+
 def _load_index():
     try:
         with open(INDEX_FILE) as f:
             idx = json.load(f)
-        if idx.get("version") == 1:
+        if idx.get("version") == 2:
             return idx
     except (OSError, ValueError):
         pass
-    return {"version": 1, "files": {}, "days": {}, "day_projects": {}, "activity": {}}
+    return _empty_index()
 
 
 def _save_index(idx):
@@ -153,8 +159,8 @@ def _scan_file(path, start_offset, last_key, idx):
                 continue
             day = dt.strftime("%Y-%m-%d")
             c = cost_usd(model, inp, out, cc5, cc1, cr)
-            _bump(idx["days"].setdefault(day, {}), model, inp, out, cc5, cc1, cr, c)
-            _bump(idx["day_projects"].setdefault(day, {}), project, inp, out, cc5, cc1, cr, c)
+            _bump(idx["days"].setdefault(day, {}).setdefault(project, {}),
+                  model, inp, out, cc5, cc1, cr, c)
             act = idx["activity"].setdefault(project, {"ts": "", "model": "", "session": ""})
             if ts > act["ts"]:
                 act.update(ts=ts, model=model, session=d.get("sessionId") or path.stem)
@@ -169,7 +175,7 @@ def refresh_index(force=False):
     with _lock:
         idx = _load_index()
         if force:
-            idx = {"version": 1, "files": {}, "days": {}, "day_projects": {}, "activity": {}}
+            idx = _empty_index()
         changed = False
         seen = set()
         for path in sorted(CLAUDE_PROJECTS.glob("*/*.jsonl")):
@@ -198,10 +204,9 @@ def refresh_index(force=False):
         for p in gone:
             del idx["files"][p]
         cutoff = (datetime.now() - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d")
-        for bucket in ("days", "day_projects"):
-            for day in [d for d in idx[bucket] if d < cutoff]:
-                del idx[bucket][day]
-                changed = True
+        for day in [d for d in idx["days"] if d < cutoff]:
+            del idx["days"][day]
+            changed = True
         # transcript timestamps are UTC "...Z" — lexicographic compare works
         cut2h = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
         idx["recent"] = [r for r in idx.get("recent", []) if r[0] >= cut2h][-500:]
@@ -220,28 +225,34 @@ def _sum(entries):
     return tot
 
 
-def _window(idx, days):
+def _acc(bucket, key, e):
+    t = bucket.setdefault(key, dict(EMPTY))
+    for k in EMPTY:
+        t[k] += e[k]
+
+
+def _agg(idx, days, project=None, model=None):
+    """Aggregate the day->project->model index with optional filters."""
     cutoff = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
-    by_model, by_project, daily = {}, {}, []
+    daily, by_model, by_project = [], {}, {}
+    total = dict(EMPTY)
     for day in sorted(idx["days"]):
         if day < cutoff:
             continue
-        models = idx["days"][day]
-        tot = _sum(models.values())
-        daily.append({"date": day, "models": models, **tot})
-        for mdl, e in models.items():
-            t = by_model.setdefault(mdl, dict(EMPTY))
-            for k in EMPTY:
-                t[k] += e[k]
-    for day, projects in idx["day_projects"].items():
-        if day < cutoff:
-            continue
-        for prj, e in projects.items():
-            t = by_project.setdefault(prj, dict(EMPTY))
-            for k in EMPTY:
-                t[k] += e[k]
-    return {"daily": daily, "by_model": by_model, "by_project": by_project,
-            "total": _sum(m for d in daily for m in [d]) if daily else dict(EMPTY)}
+        day_models = {}
+        for prj, models in idx["days"][day].items():
+            if project and prj != project:
+                continue
+            for mdl, e in models.items():
+                if model and mdl != model:
+                    continue
+                _acc(day_models, mdl, e)
+                _acc(by_model, mdl, e)
+                _acc(by_project, prj, e)
+                for k in EMPTY:
+                    total[k] += e[k]
+        daily.append({"date": day, "models": day_models, **_sum(day_models.values())})
+    return daily, by_model, by_project, total
 
 
 def rtk_gain():
@@ -255,15 +266,25 @@ def rtk_gain():
     return None
 
 
-def build_summary(idx):
+def build_summary(idx, project=None, model=None, days=30):
     now = datetime.now().astimezone()
     today = now.strftime("%Y-%m-%d")
-    w30 = _window(idx, 30)
-    w7 = _window(idx, 7)
-    today_models = idx["days"].get(today, {})
+    daily, by_model, by_project, total = _agg(idx, days, project, model)
+    today_models = {}
+    for prj, models in idx["days"].get(today, {}).items():
+        if project and prj != project:
+            continue
+        for mdl, e in models.items():
+            if model and mdl != model:
+                continue
+            _acc(today_models, mdl, e)
     today_tot = _sum(today_models.values())
     live, cutoff = [], (now - timedelta(minutes=LIVE_WINDOW_MIN))
     for prj, act in idx["activity"].items():
+        if project and prj != project:
+            continue
+        if model and act.get("model") != model:
+            continue
         try:
             ts = datetime.fromisoformat(act["ts"].replace("Z", "+00:00"))
         except ValueError:
@@ -271,11 +292,13 @@ def build_summary(idx):
         if ts >= cutoff:
             live.append({"project": prj, "ts": act["ts"], "model": act["model"]})
     live.sort(key=lambda x: x["ts"], reverse=True)
-    t30 = w30["total"]
-    cache_denom = t30["in"] + t30["cr"] + t30["cc5"] + t30["cc1"]
+    cache_denom = total["in"] + total["cr"] + total["cc5"] + total["cc1"]
     # live monitoring: activity feed + per-minute throughput over the last 60 min
     cut60 = (datetime.now(timezone.utc) - timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%S")
-    ev = sorted((r for r in idx.get("recent", []) if r[0] >= cut60),
+    ev = sorted((r for r in idx.get("recent", [])
+                 if r[0] >= cut60
+                 and (not project or r[1] == project)
+                 and (not model or r[2] == model)),
                 key=lambda r: r[0], reverse=True)
     feed = [{"ts": r[0], "project": r[1], "model": r[2], "out": r[4], "cost": r[6]}
             for r in ev[:30]]
@@ -294,19 +317,24 @@ def build_summary(idx):
     for i in range(30):
         label = (start + timedelta(minutes=i)).strftime("%H:%M")
         minutely.append({"t": label, **buckets.get(label, {"out": 0, "cost": 0.0, "n": 0})})
+    all_projects = sorted({p for d in idx["days"].values() for p in d})
+    all_models = sorted({m for d in idx["days"].values()
+                         for ms in d.values() for m in ms})
     return {
         "generated_at": now.isoformat(timespec="seconds"),
+        "filter": {"project": project or "", "model": model or "", "days": days},
         "today": {**today_tot, "models": today_models},
-        "last7": w7["total"],
-        "last30": t30,
-        "daily": w30["daily"],
-        "by_model": w30["by_model"],
-        "by_project": dict(sorted(w30["by_project"].items(),
+        "window": total,
+        "daily": daily,
+        "by_model": by_model,
+        "by_project": dict(sorted(by_project.items(),
                                   key=lambda kv: kv[1]["cost"], reverse=True)[:20]),
-        "cache_hit_rate": (t30["cr"] / cache_denom) if cache_denom else 0.0,
+        "cache_hit_rate": (total["cr"] / cache_denom) if cache_denom else 0.0,
         "live_sessions": live[:10],
         "feed": feed,
         "minutely": minutely,
+        "projects": all_projects,
+        "models": all_models,
         "rtk": rtk_gain(),
     }
 
@@ -320,7 +348,7 @@ def save_snapshot(summary=None):
         "ts": summary["generated_at"],
         "date": summary["generated_at"][:10],
         "today": {k: v for k, v in summary["today"].items() if k != "models"},
-        "last30_cost": summary["last30"]["cost"],
+        "last30_cost": summary["window"]["cost"],
         "cache_hit_rate": summary["cache_hit_rate"],
         "rtk_saved": (summary["rtk"] or {}).get("total_saved"),
     }
@@ -348,13 +376,13 @@ def bar(frac, width=24):
 
 def cmd_report(days):
     idx, _ = refresh_index()
-    s = build_summary(idx)
-    t, today = s["last30"], s["today"]
+    s = build_summary(idx, days=days)
+    t, today = s["window"], s["today"]
     print("rtk-pulse — Claude Code Token Usage")
     print("═" * 64)
     print(f"Today:      in {fmt_tok(today['in'] + today['cr'] + today['cc5'] + today['cc1']):>8}"
           f"   out {fmt_tok(today['out']):>8}   ≈ ${today['cost']:.2f}   ({today['n']} msgs)")
-    print(f"Last 30d:   in {fmt_tok(t['in'] + t['cr'] + t['cc5'] + t['cc1']):>8}"
+    print(f"Last {days:>2}d:   in {fmt_tok(t['in'] + t['cr'] + t['cc5'] + t['cc1']):>8}"
           f"   out {fmt_tok(t['out']):>8}   ≈ ${t['cost']:.2f}   ({t['n']} msgs)")
     print(f"Cache hits: {bar(s['cache_hit_rate'])} {s['cache_hit_rate'] * 100:.1f}%")
     if s["rtk"]:
@@ -425,17 +453,26 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        parsed = urlparse(self.path)
+        route = parsed.path
+        q = parse_qs(parsed.query)
+        project = (q.get("project") or [""])[0] or None
+        model = (q.get("model") or [""])[0] or None
+        try:
+            days = max(1, min(KEEP_DAYS, int((q.get("days") or ["30"])[0])))
+        except ValueError:
+            days = 30
+        if route in ("/", "/index.html"):
             try:
                 body = (SCRIPT_DIR / "dashboard.html").read_bytes()
             except OSError:
                 body = b"dashboard.html not found"
             self._send(200, "text/html; charset=utf-8", body)
-        elif self.path == "/api/summary":
+        elif route == "/api/summary":
             idx, _ = refresh_index()
-            body = json.dumps(build_summary(idx)).encode()
+            body = json.dumps(build_summary(idx, project, model, days)).encode()
             self._send(200, "application/json", body)
-        elif self.path == "/events":
+        elif route == "/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
@@ -448,7 +485,7 @@ class Handler(BaseHTTPRequestHandler):
                     if state != last_state:
                         last_state = state
                         idx, _ = refresh_index()
-                        payload = json.dumps(build_summary(idx))
+                        payload = json.dumps(build_summary(idx, project, model, days))
                         self.wfile.write(f"data: {payload}\n\n".encode())
                         self.wfile.flush()
                     elif time.time() - last_beat > 15:

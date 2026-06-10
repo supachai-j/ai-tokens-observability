@@ -55,6 +55,19 @@
   .theme-toggle .icon-moon { display: none; }
   [data-theme="light"] .theme-toggle .icon-sun { display: none; }
   [data-theme="light"] .theme-toggle .icon-moon { display: block; }
+  .filters { display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+             margin-bottom: 16px; }
+  .filters label { color: var(--dim); font-size: 11px; text-transform: uppercase;
+                   letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
+  .filters select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; font: 12px ui-monospace, Menlo, monospace;
+    max-width: 240px; cursor: pointer;
+  }
+  .filters .clear { color: var(--accent); font-size: 12px; cursor: pointer;
+                    background: none; border: none; padding: 0; font-family: inherit;
+                    text-transform: none; letter-spacing: 0; display: none; }
+  .filters .clear.show { display: inline; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
            gap: 12px; margin-bottom: 18px; }
   .card { background: var(--panel); border: 1px solid var(--border);
@@ -109,14 +122,28 @@
   </button>
 </header>
 
+<div class="filters">
+  <label>project
+    <select id="f-project"><option value="">all</option></select></label>
+  <label>model
+    <select id="f-model"><option value="">all</option></select></label>
+  <label>window
+    <select id="f-days">
+      <option value="1">today</option><option value="7">7d</option>
+      <option value="14">14d</option><option value="30" selected>30d</option>
+      <option value="60">60d</option><option value="90">90d</option>
+    </select></label>
+  <button class="clear" id="f-clear" type="button">× clear filters</button>
+</div>
+
 <div class="cards">
   <div class="card"><div class="label">Today · output</div>
     <div class="value" id="c-today-out">–</div><div class="sub" id="c-today-in"></div></div>
   <div class="card"><div class="label">Today · est. cost</div>
     <div class="value" id="c-today-cost">–</div><div class="sub" id="c-today-msgs"></div></div>
-  <div class="card"><div class="label">Last 30d · est. cost</div>
+  <div class="card"><div class="label" id="l-window">Last 30d · est. cost</div>
     <div class="value" id="c-30d-cost">–</div><div class="sub" id="c-7d-cost"></div></div>
-  <div class="card"><div class="label">Cache hit rate (30d)</div>
+  <div class="card"><div class="label" id="l-cache">Cache hit rate</div>
     <div class="value" id="c-cache">–</div><div class="meter"><div id="m-cache"></div></div></div>
   <div class="card"><div class="label">rtk tokens saved</div>
     <div class="value" id="c-rtk">–</div><div class="sub" id="c-rtk-pct"></div>
@@ -137,13 +164,13 @@
 </div>
 
 <div class="grid">
-  <div class="panel"><h2>Daily cost · last 30 days</h2><canvas id="chart-daily"></canvas></div>
-  <div class="panel"><h2>Cost by model · 30d</h2><canvas id="chart-model"></canvas></div>
+  <div class="panel"><h2>Daily cost · <span class="win">last 30d</span></h2><canvas id="chart-daily"></canvas></div>
+  <div class="panel"><h2>Cost by model · <span class="win">last 30d</span></h2><canvas id="chart-model"></canvas></div>
 </div>
 
 <div class="grid2">
   <div class="panel">
-    <h2>Projects · 30d</h2>
+    <h2>Projects · <span class="win">last 30d</span></h2>
     <table id="t-projects"><thead>
       <tr><th>project</th><th class="num">msgs</th><th class="num">output</th><th class="num">cost</th></tr>
     </thead><tbody></tbody></table>
@@ -151,7 +178,7 @@
   <div class="panel">
     <h2>Live sessions <span class="tag">(active &lt; 10 min)</span></h2>
     <ul id="live-list"><li class="muted">none</li></ul>
-    <h2 style="margin-top:16px">Models · 30d</h2>
+    <h2 style="margin-top:16px">Models · <span class="win">last 30d</span></h2>
     <table id="t-models"><thead>
       <tr><th>model</th><th class="num">out tok</th><th class="num">cost</th></tr>
     </thead><tbody></tbody></table>
@@ -221,17 +248,34 @@ function applyChartTheme() {
 }
 
 let lastSummary = null;
+const state = { project: '', model: '', days: 30 };
+const qs = () => 'project=' + encodeURIComponent(state.project) +
+                 '&model=' + encodeURIComponent(state.model) + '&days=' + state.days;
+
+function fillSelect(sel, items, current, fmt) {
+  if (sel.options.length === items.length + 1 && sel.value === current) return;
+  sel.innerHTML = '<option value="">all</option>' + items.map(x =>
+    `<option value="${x}">${(fmt || (v => v))(x)}</option>`).join('');
+  sel.value = items.includes(current) ? current : '';
+}
 
 function render(s) {
   lastSummary = s;
   const COLORS = palette();
-  const t = s.today, m = s.last30;
+  const t = s.today, m = s.window;
+  const winLabel = s.filter.days === 1 ? 'today' : 'last ' + s.filter.days + 'd';
+  document.querySelectorAll('.win').forEach(el => el.textContent = winLabel);
+  $('l-window').textContent = winLabel + ' · est. cost';
+  $('l-cache').textContent = 'Cache hit rate (' + winLabel + ')';
+  fillSelect($('f-project'), s.projects, state.project);
+  fillSelect($('f-model'), s.models, state.model, shortModel);
+  $('f-clear').classList.toggle('show', !!(state.project || state.model));
   $('c-today-out').textContent = tok(t.out);
   $('c-today-in').textContent = 'in ' + tok(t.in + t.cr + t.cc5 + t.cc1) + ' (incl. cache)';
   $('c-today-cost').textContent = usd(t.cost);
   $('c-today-msgs').textContent = t.n + ' messages';
   $('c-30d-cost').textContent = usd(m.cost);
-  $('c-7d-cost').textContent = '7d: ' + usd(s.last7.cost);
+  $('c-7d-cost').textContent = m.n + ' messages';
   $('c-cache').textContent = (s.cache_hit_rate * 100).toFixed(1) + '%';
   $('m-cache').style.width = (s.cache_hit_rate * 100).toFixed(1) + '%';
   $('m-rtk').style.background = cssVar('--accent');
@@ -324,8 +368,10 @@ function render(s) {
 })();
 applyChartTheme();
 
+let es = null;
 function connect() {
-  const es = new EventSource('/events');
+  if (es) es.close();
+  es = new EventSource('/events?' + qs());
   es.onmessage = e => render(JSON.parse(e.data));
   es.onerror = () => {
     $('status').innerHTML = '<span class="dot" id="dot"></span>reconnecting…';
@@ -333,8 +379,23 @@ function connect() {
     setTimeout(connect, 3000);
   };
 }
-fetch('/api/summary').then(r => r.json()).then(render).catch(() => {});
-connect();
+function applyFilters() {
+  fetch('/api/summary?' + qs()).then(r => r.json()).then(render).catch(() => {});
+  connect();
+}
+['f-project', 'f-model', 'f-days'].forEach(id =>
+  $(id).addEventListener('change', () => {
+    state.project = $('f-project').value;
+    state.model = $('f-model').value;
+    state.days = +$('f-days').value;
+    applyFilters();
+  }));
+$('f-clear').addEventListener('click', () => {
+  state.project = state.model = '';
+  $('f-project').value = $('f-model').value = '';
+  applyFilters();
+});
+applyFilters();
 </script>
 </body>
 </html>

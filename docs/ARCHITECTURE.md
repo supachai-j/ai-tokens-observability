@@ -110,7 +110,10 @@ Pure functions over the index. `build_summary(idx, project, model, days)`
 produces the one JSON payload the frontend consumes: today + window totals,
 per-day series (stacked by model), by-model and by-project rollups, cache
 hit rate, live sessions, activity feed, per-minute throughput, dropdown
-domains (`projects`, `models`), FX rate, and the rtk savings summary.
+domains (`projects`, `models`), FX rate, the rtk savings summary, and a
+`budget` sub-object `{limit, month_cost, month}` — `limit` comes from the
+`RTK_PULSE_BUDGET` env var (USD float); the frontend renders a color-coded
+spend-vs-limit meter when it is set.
 
 ### 4. Cost model (`PRICING`, `cost_usd`)
 
@@ -131,7 +134,7 @@ the frontend so switching USD/THB is instant.
 | `GET /api/summary?project=&model=&source=&days=` | one filtered summary JSON |
 | `GET /events?project=&model=&source=&days=` | SSE stream of filtered summaries |
 | `GET /api/sessions?project=&source=` | recent sessions across tools (newest first) |
-| `GET /api/trace?path=` | full trace of one session: prompts, assistant/thinking text, tool + MCP calls, tool results, per-call usage/cost. `path` must exactly match a discovered session file — anything else is rejected (no traversal). Traces are built on demand from the raw session file, not from the index; capped at the last 600 steps. |
+| `GET /api/trace?path=` | full trace of one session: prompts, assistant/thinking text, tool + MCP calls, tool results, per-call usage/cost. `path` must exactly match a discovered session file — anything else is rejected (no traversal). Traces are built on demand from the raw session file, not from the index; capped at the last N steps (default 600, configurable via `RTK_PULSE_TRACE_MAX`, min 50). |
 
 The SSE loop polls a cheap filesystem fingerprint (file count + total size +
 max mtime over the transcript tree) every 3 s; only when it changes does it

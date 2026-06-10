@@ -18,8 +18,10 @@ rtk saved:  ██████████████░░░░░░░░�
 - **Live web dashboard** (`serve`) — SSE-pushed updates every few seconds:
   today/windowed token totals and cost estimates, daily stacked cost chart by
   model, cost-by-model donut, per-project table, cache-efficiency meter,
-  live throughput + activity feed, and an **rtk savings panel**
-  (`rtk gain --format json`).
+  live throughput + activity feed, an **rtk savings panel**
+  (`rtk gain --format json`), and a **monthly budget indicator** (set
+  `RTK_PULSE_BUDGET` to show month-to-date spend vs. limit with a
+  color-coded progress meter).
 - **Filters** — by tool (Claude Code / Codex / Gemini), project, model, and
   time window (today–90d); light/dark theme; USD/THB currency (live FX rate,
   cached 12h, `RTK_PULSE_THB` override); live monitoring can be toggled
@@ -85,6 +87,12 @@ export RTK_PULSE_THB=33.0
 
 # relocate the data dir (index, history, fx cache); default ~/.config/rtk-pulse
 export RTK_PULSE_HOME=~/somewhere/else
+
+# monthly spend limit in USD — enables the budget card + color-coded meter
+export RTK_PULSE_BUDGET=20.0
+
+# max trace steps shown in the session drilldown (default 600, min 50)
+export RTK_PULSE_TRACE_MAX=600
 ```
 
 **Uninstall** — delete the clone and `~/.config/rtk-pulse/`.

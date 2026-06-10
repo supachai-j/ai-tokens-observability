@@ -985,5 +985,182 @@ class TestCmdReport(unittest.TestCase):
         self.assertIn("Today:", buf.getvalue())
 
 
+# ---------------------------------------------------------------------------
+# TestListSessions
+# ---------------------------------------------------------------------------
+
+class TestListSessions(unittest.TestCase):
+    """list_sessions ordering, source filter, size floor, and codex cwd inference."""
+
+    def _fake_discover(self, tmp):
+        """Build fake (path, kind) pairs that _discover would return."""
+        claude_dir = tmp / "claude"
+        codex_dir = tmp / "codex"
+        claude_dir.mkdir()
+        codex_dir.mkdir()
+
+        # Claude session — project derived from path; must be >= 300 bytes
+        claude_file = claude_dir / "session.jsonl"
+        line = '{"requestId":"r1"}'
+        claude_file.write_text((line + " " * max(0, 301 - len(line))) + "\n")
+
+        # Codex session — project derived from cwd in first line; must be >= 300 bytes
+        codex_file = codex_dir / "rollout-abc.jsonl"
+        cwd = str(Path.home() / "workspace" / "myproject")
+        codex_line = json.dumps({"payload": {"cwd": cwd}})
+        codex_file.write_text(
+            (codex_line + " " * max(0, 301 - len(codex_line))) + "\n"
+        )
+
+        # Tiny file below the 300-byte floor — should be skipped
+        small_file = claude_dir / "small.jsonl"
+        small_file.write_text('{"requestId":"r2"}\n')  # < 300 bytes
+
+        return claude_file, codex_file, small_file
+
+    def test_newest_first_ordering(self):
+        """Sessions are returned newest-first by mtime."""
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            claude_file, codex_file, _ = self._fake_discover(tmp)
+
+            import os
+            # Make claude_file older, codex_file newer
+            os.utime(claude_file, (1_000_000, 1_000_000))
+            os.utime(codex_file, (2_000_000, 2_000_000))
+
+            def fake_discover():
+                return [
+                    (claude_file, "claude"),
+                    (codex_file, "codex"),
+                ]
+
+            with patch.multiple(
+                pulse,
+                _discover=fake_discover,
+                _project_name=lambda p: "myproject",
+            ):
+                sessions = pulse.list_sessions()
+
+            self.assertGreaterEqual(len(sessions), 2)
+            mtimes = [s["mtime"] for s in sessions]
+            self.assertEqual(mtimes, sorted(mtimes, reverse=True))
+
+    def test_source_filter(self):
+        """source='codex' returns only codex entries."""
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            claude_file, codex_file, _ = self._fake_discover(tmp)
+
+            def fake_discover():
+                return [
+                    (claude_file, "claude"),
+                    (codex_file, "codex"),
+                ]
+
+            with patch.multiple(
+                pulse,
+                _discover=fake_discover,
+                _project_name=lambda p: "myproject",
+            ):
+                sessions = pulse.list_sessions(source="codex")
+
+            self.assertTrue(all(s["source"] == "codex" for s in sessions))
+            paths = [s["path"] for s in sessions]
+            self.assertIn(str(codex_file), paths)
+            self.assertNotIn(str(claude_file), paths)
+
+    def test_small_file_skipped(self):
+        """Files smaller than 300 bytes are excluded."""
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            _, _, small_file = self._fake_discover(tmp)
+
+            def fake_discover():
+                return [(small_file, "claude")]
+
+            with patch.multiple(
+                pulse,
+                _discover=fake_discover,
+                _project_name=lambda p: "myproject",
+            ):
+                sessions = pulse.list_sessions()
+
+            paths = [s["path"] for s in sessions]
+            self.assertNotIn(str(small_file), paths)
+
+    def test_codex_cwd_project_inference(self):
+        """Codex sessions derive project from cwd in the first JSON line."""
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            codex_dir = tmp / "codex"
+            codex_dir.mkdir()
+            codex_file = codex_dir / "rollout-xyz.jsonl"
+
+            cwd = str(Path.home() / "workspace" / "myproject")
+            # Write enough bytes to exceed the 300-byte floor
+            line = json.dumps({"payload": {"cwd": cwd}})
+            padding = " " * max(0, 301 - len(line))
+            codex_file.write_text(line + padding + "\n")
+
+            def fake_discover():
+                return [(codex_file, "codex")]
+
+            with patch.multiple(pulse, _discover=fake_discover):
+                sessions = pulse.list_sessions()
+
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["project"], "workspace-myproject")
+
+
+# ---------------------------------------------------------------------------
+# TestFxThbEnvOverride
+# ---------------------------------------------------------------------------
+
+class TestFxThbEnvOverride(unittest.TestCase):
+    """RTK_PULSE_THB env var returns (float, 'env') without any network call."""
+
+    def test_env_rate_returned(self):
+        """RTK_PULSE_THB=35.5 → fx_thb() returns (35.5, 'env')."""
+        with patch.dict("os.environ", {"RTK_PULSE_THB": "35.5"}):
+            # Clear in-process memo so env check fires first
+            orig = dict(pulse._fx_mem)
+            pulse._fx_mem.update(ts=0.0, thb=None, src=None)
+            try:
+                rate, src = pulse.fx_thb()
+            finally:
+                pulse._fx_mem.update(**orig)
+        self.assertAlmostEqual(rate, 35.5)
+        self.assertEqual(src, "env")
+
+    def test_env_skips_network(self):
+        """RTK_PULSE_THB set → urlopen is never called."""
+        with patch.dict("os.environ", {"RTK_PULSE_THB": "40.0"}), \
+             patch("pulse.urllib.request.urlopen") as mock_open:
+            orig = dict(pulse._fx_mem)
+            pulse._fx_mem.update(ts=0.0, thb=None, src=None)
+            try:
+                rate, src = pulse.fx_thb()
+            finally:
+                pulse._fx_mem.update(**orig)
+        mock_open.assert_not_called()
+        self.assertEqual(src, "env")
+
+    def test_invalid_env_falls_through(self):
+        """RTK_PULSE_THB=notanumber → falls through to cache/live/fallback."""
+        with patch.dict("os.environ", {"RTK_PULSE_THB": "notanumber"}), \
+             patch("pulse.urllib.request.urlopen", side_effect=OSError("offline")):
+            # Seed memo with a known value to check fall-through path
+            orig = dict(pulse._fx_mem)
+            pulse._fx_mem.update(ts=time.time(), thb=31.0, src="cached")
+            try:
+                rate, src = pulse.fx_thb()
+            finally:
+                pulse._fx_mem.update(**orig)
+        # Should return the memo value (not env, not network)
+        self.assertAlmostEqual(rate, 31.0)
+        self.assertNotEqual(src, "env")
+
+
 if __name__ == "__main__":
     unittest.main()

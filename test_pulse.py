@@ -535,5 +535,307 @@ class TestRLockNoDeadlock(unittest.TestCase):
             self.assertIsNotNone(result[0], "refresh_index should return (idx, changed)")
 
 
+# ---------------------------------------------------------------------------
+# 7. Gemini scan — token math (_scan_gemini_jsonl + _scan_gemini_json)
+# ---------------------------------------------------------------------------
+
+class TestGeminiScanJsonl(unittest.TestCase):
+    """_scan_gemini_jsonl: inp=input+tool, out=output+thoughts, cr=cached,
+    net_in = max(0, inp - cr) because input already includes cached."""
+
+    def _setup(self, tmp):
+        tp = Path(tmp)
+        proj_dir = tp / "proj1" / "chats"
+        proj_dir.mkdir(parents=True)
+        return proj_dir
+
+    def _gemini_msg(self, model, inp, out, tool=0, thoughts=0, cached=0,
+                    ts="2026-01-01T10:00:00Z"):
+        return {"timestamp": ts, "model": model,
+                "tokens": {"input": inp, "output": out, "tool": tool,
+                           "thoughts": thoughts, "cached": cached}}
+
+    def _scan(self, gemini_tmp, path):
+        idx = pulse._empty_index()
+        with patch("pulse.GEMINI_TMP", gemini_tmp):
+            pulse._scan_gemini_jsonl(path, 0, {}, idx)
+        return idx
+
+    def test_basic_token_math(self):
+        """input+tool → inp, output+thoughts → out, cached → cr."""
+        with tempfile.TemporaryDirectory() as d:
+            gdir = self._setup(d)
+            path = gdir / "chat.jsonl"
+            msg = self._gemini_msg("gemini-2.5-pro", inp=400, out=100,
+                                   tool=50, thoughts=20, cached=0)
+            _write_jsonl(path, [msg])
+            idx = self._scan(Path(d), path)
+            day = list(idx["days"].values())[0]
+            entry = list(list(day.values())[0].values())[0]
+            self.assertEqual(entry["in"], 450)   # inp+tool = 400+50
+            self.assertEqual(entry["out"], 120)  # out+thoughts = 100+20
+
+    def test_cached_subtracted_from_net_input(self):
+        """Net input = max(0, input+tool - cached); cached → cr field."""
+        with tempfile.TemporaryDirectory() as d:
+            gdir = self._setup(d)
+            path = gdir / "chat.jsonl"
+            msg = self._gemini_msg("gemini-2.5-pro", inp=400, out=100, cached=100)
+            _write_jsonl(path, [msg])
+            idx = self._scan(Path(d), path)
+            day = list(idx["days"].values())[0]
+            entry = list(list(day.values())[0].values())[0]
+            self.assertEqual(entry["in"], 300)  # 400 - 100
+            self.assertEqual(entry["cr"], 100)
+
+    def test_cached_exceeds_input_clamps_to_zero(self):
+        """max(0, inp - cr) never goes negative."""
+        with tempfile.TemporaryDirectory() as d:
+            gdir = self._setup(d)
+            path = gdir / "chat.jsonl"
+            msg = self._gemini_msg("gemini-2.5-pro", inp=50, out=30, cached=100)
+            _write_jsonl(path, [msg])
+            idx = self._scan(Path(d), path)
+            day = list(idx["days"].values())[0]
+            entry = list(list(day.values())[0].values())[0]
+            self.assertEqual(entry["in"], 0)
+            self.assertEqual(entry["cr"], 100)
+
+    def test_lines_without_tokens_skipped(self):
+        """Lines missing the 'tokens' key are silently ignored."""
+        with tempfile.TemporaryDirectory() as d:
+            gdir = self._setup(d)
+            path = gdir / "chat.jsonl"
+            no_tokens = {"timestamp": "2026-01-01T10:00:00Z", "type": "user",
+                         "content": "hello"}
+            with_tokens = self._gemini_msg("gemini-2.5-pro", inp=200, out=80)
+            _write_jsonl(path, [no_tokens, with_tokens])
+            idx = self._scan(Path(d), path)
+            total_n = sum(
+                e["n"]
+                for day in idx["days"].values()
+                for proj in day.values()
+                for e in proj.values()
+            )
+            self.assertEqual(total_n, 1)
+
+
+class TestGeminiScanJson(unittest.TestCase):
+    """_scan_gemini_json: whole-document .json, cursor tracks message count."""
+
+    def _setup(self, tmp):
+        tp = Path(tmp)
+        proj_dir = tp / "proj2" / "chats"
+        proj_dir.mkdir(parents=True)
+        return proj_dir
+
+    def _scan(self, gemini_tmp, path, state=None):
+        idx = pulse._empty_index()
+        with patch("pulse.GEMINI_TMP", gemini_tmp):
+            new_state = pulse._scan_gemini_json(path, state or {}, idx)
+        return idx, new_state
+
+    def test_basic_token_math(self):
+        """Same token math as jsonl variant."""
+        with tempfile.TemporaryDirectory() as d:
+            gdir = self._setup(d)
+            path = gdir / "chat.json"
+            doc = {"sessionId": "s1", "messages": [
+                {"timestamp": "2026-01-01T10:00:00Z", "model": "gemini-2.5-flash",
+                 "tokens": {"input": 300, "output": 90, "tool": 30,
+                            "thoughts": 10, "cached": 0}},
+            ]}
+            path.write_text(json.dumps(doc))
+            idx, _ = self._scan(Path(d), path)
+            day = list(idx["days"].values())[0]
+            entry = list(list(day.values())[0].values())[0]
+            self.assertEqual(entry["in"], 330)  # 300+30
+            self.assertEqual(entry["out"], 100)  # 90+10
+
+    def test_cursor_prevents_recount(self):
+        """Second scan with cursor n=1 skips the first message."""
+        with tempfile.TemporaryDirectory() as d:
+            gdir = self._setup(d)
+            path = gdir / "chat.json"
+            msg = {"timestamp": "2026-01-01T10:00:00Z", "model": "gemini-2.5-flash",
+                   "tokens": {"input": 100, "output": 50, "cached": 0}}
+            doc = {"messages": [msg, msg]}
+            path.write_text(json.dumps(doc))
+            # Scan from cursor n=1: only second message should be processed
+            idx, state = self._scan(Path(d), path, {"n": 1})
+            total_n = sum(
+                e["n"]
+                for day in idx["days"].values()
+                for proj in day.values()
+                for e in proj.values()
+            )
+            self.assertEqual(total_n, 1)
+            self.assertEqual(state["n"], 2)
+
+    def test_fallback_ts_used_when_message_has_no_timestamp(self):
+        """lastUpdated is used as fallback timestamp when message has none."""
+        with tempfile.TemporaryDirectory() as d:
+            gdir = self._setup(d)
+            path = gdir / "chat.json"
+            doc = {"lastUpdated": "2026-01-02T08:00:00Z", "messages": [
+                {"model": "gemini-2.5-flash",
+                 "tokens": {"input": 100, "output": 40, "cached": 0}},
+            ]}
+            path.write_text(json.dumps(doc))
+            idx, _ = self._scan(Path(d), path)
+            # Should land in the 2026-01-02 day bucket (from lastUpdated)
+            self.assertIn("2026-01-02", idx["days"])
+
+
+# ---------------------------------------------------------------------------
+# 8. build_summary end-to-end
+# ---------------------------------------------------------------------------
+
+class TestBuildSummary(unittest.TestCase):
+    def _make_idx(self):
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        idx["days"][today] = {
+            "projA": {
+                "claude-sonnet-4-5": {
+                    "in": 1000, "out": 500, "cc5": 0, "cc1": 0,
+                    "cr": 200, "n": 3, "cost": 0.01,
+                },
+            },
+            "projB": {
+                "claude-opus-4-6": {
+                    "in": 2000, "out": 800, "cc5": 100, "cc1": 0,
+                    "cr": 0, "n": 2, "cost": 0.05,
+                },
+            },
+        }
+        # activity for projA (recent enough to be "live")
+        from datetime import timezone
+        idx["activity"]["projA"] = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "model": "claude-sonnet-4-5",
+            "session": "s1",
+        }
+        return idx
+
+    def test_today_totals_match_index(self):
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=1)
+        self.assertEqual(s["today"]["n"], 5)   # 3 + 2
+        self.assertEqual(s["today"]["out"], 1300)  # 500 + 800
+
+    def test_window_aggregates_all_data(self):
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        self.assertEqual(s["window"]["n"], 5)
+        self.assertIn("projA", s["by_project"])
+        self.assertIn("projB", s["by_project"])
+
+    def test_cache_hit_rate_computed(self):
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        # cache_denom = in(1000+2000) + cr(200) + cc5(100) + cc1(0) = 3300
+        # cache_hit_rate = cr(200) / 3300
+        expected = 200 / 3300
+        self.assertAlmostEqual(s["cache_hit_rate"], expected, places=5)
+
+    def test_by_model_keys_present(self):
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        self.assertIn("claude-sonnet-4-5", s["by_model"])
+        self.assertIn("claude-opus-4-6", s["by_model"])
+
+    def test_live_sessions_includes_recent_activity(self):
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        projects = [x["project"] for x in s["live_sessions"]]
+        self.assertIn("projA", projects)
+
+    def test_project_filter_isolates_projA(self):
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90, project="projA")
+        self.assertNotIn("projB", s["by_project"])
+        self.assertEqual(s["window"]["n"], 3)
+
+    def test_sources_list_populated(self):
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        self.assertIn("claude", s["sources"])
+
+
+# ---------------------------------------------------------------------------
+# 9. save_snapshot — history.jsonl pruning
+# ---------------------------------------------------------------------------
+
+class TestSaveSnapshotPruning(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_history(self, dates):
+        hist = self.data_dir / "history.jsonl"
+        with open(hist, "w") as f:
+            for d in dates:
+                f.write(json.dumps({"ts": d + "T00:00:00", "date": d,
+                                    "today": {}, "last30_cost": 0.0,
+                                    "cache_hit_rate": 0.0,
+                                    "rtk_saved": None}) + "\n")
+        return hist
+
+    def test_old_entries_pruned(self):
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        old = (today - timedelta(days=pulse.KEEP_DAYS + 10)).strftime("%Y-%m-%d")
+        recent = (today - timedelta(days=5)).strftime("%Y-%m-%d")
+        hist = self._write_history([old, recent])
+
+        idx = pulse._empty_index()
+        idx["days"][today.strftime("%Y-%m-%d")] = {
+            "p": {"claude-sonnet-4-5": {"in": 10, "out": 5, "cc5": 0, "cc1": 0,
+                                        "cr": 0, "n": 1, "cost": 0.0001}}
+        }
+        with patch("pulse.DATA_DIR", self.data_dir), \
+             patch("pulse.HISTORY_FILE", hist), \
+             patch("pulse.INDEX_FILE", self.data_dir / "index.json"), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            pulse.save_snapshot(pulse.build_summary(idx))
+
+        lines = [json.loads(l) for l in hist.read_text().splitlines() if l.strip()]
+        dates = [l["date"] for l in lines]
+        self.assertNotIn(old, dates, "entry older than KEEP_DAYS should be pruned")
+        self.assertIn(recent, dates, "recent entry should be kept")
+
+    def test_empty_history_safe(self):
+        """save_snapshot handles missing history file gracefully."""
+        hist = self.data_dir / "history.jsonl"
+        idx = pulse._empty_index()
+        with patch("pulse.DATA_DIR", self.data_dir), \
+             patch("pulse.HISTORY_FILE", hist), \
+             patch("pulse.INDEX_FILE", self.data_dir / "index.json"), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            pulse.save_snapshot(pulse.build_summary(idx))
+        self.assertTrue(hist.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>rtk-pulse · token usage</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #21262d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #2f81f7;
+    --green: #3fb950; --amber: #d29922; --red: #f85149; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    padding: 20px; max-width: 1240px; margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+  h1 { font-size: 20px; letter-spacing: .5px; }
+  h1 .pulse { color: var(--accent); }
+  #status { color: var(--dim); font-size: 12px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         background: var(--red); margin-right: 5px; vertical-align: 1px; }
+  .dot.live { background: var(--green); animation: blink 2s infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+           gap: 12px; margin-bottom: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 8px; padding: 12px 14px; }
+  .card .label { color: var(--dim); font-size: 11px; text-transform: uppercase;
+                 letter-spacing: 1px; margin-bottom: 4px; }
+  .card .value { font-size: 22px; font-weight: 600; }
+  .card .sub { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  @media (max-width: 900px) { .grid, .grid2 { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 8px; padding: 14px; }
+  .panel h2 { font-size: 12px; color: var(--dim); text-transform: uppercase;
+              letter-spacing: 1px; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--dim); font-weight: normal; font-size: 11px;
+       text-transform: uppercase; padding: 4px 8px 6px 0; border-bottom: 1px solid var(--border); }
+  td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td.num, th.num { text-align: right; }
+  .meter { background: var(--border); border-radius: 4px; height: 8px; overflow: hidden; margin-top: 6px; }
+  .meter > div { height: 100%; background: var(--green); transition: width .6s; }
+  .tag { color: var(--dim); font-size: 11px; }
+  #live-list li { list-style: none; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  #live-list .prj { color: var(--text); }
+  .muted { color: var(--dim); }
+  canvas { max-height: 260px; }
+  footer { color: var(--dim); font-size: 11px; margin-top: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>rtk-<span class="pulse">pulse</span></h1>
+  <span id="status"><span class="dot" id="dot"></span>connecting…</span>
+</header>
+
+<div class="cards">
+  <div class="card"><div class="label">Today · output</div>
+    <div class="value" id="c-today-out">–</div><div class="sub" id="c-today-in"></div></div>
+  <div class="card"><div class="label">Today · est. cost</div>
+    <div class="value" id="c-today-cost">–</div><div class="sub" id="c-today-msgs"></div></div>
+  <div class="card"><div class="label">Last 30d · est. cost</div>
+    <div class="value" id="c-30d-cost">–</div><div class="sub" id="c-7d-cost"></div></div>
+  <div class="card"><div class="label">Cache hit rate (30d)</div>
+    <div class="value" id="c-cache">–</div><div class="meter"><div id="m-cache"></div></div></div>
+  <div class="card"><div class="label">rtk tokens saved</div>
+    <div class="value" id="c-rtk">–</div><div class="sub" id="c-rtk-pct"></div>
+    <div class="meter"><div id="m-rtk" style="background:var(--accent)"></div></div></div>
+</div>
+
+<div class="grid">
+  <div class="panel"><h2>Daily cost · last 30 days</h2><canvas id="chart-daily"></canvas></div>
+  <div class="panel"><h2>Cost by model · 30d</h2><canvas id="chart-model"></canvas></div>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2>Projects · 30d</h2>
+    <table id="t-projects"><thead>
+      <tr><th>project</th><th class="num">msgs</th><th class="num">output</th><th class="num">cost</th></tr>
+    </thead><tbody></tbody></table>
+  </div>
+  <div class="panel">
+    <h2>Live sessions <span class="tag">(active &lt; 10 min)</span></h2>
+    <ul id="live-list"><li class="muted">none</li></ul>
+    <h2 style="margin-top:16px">Models · 30d</h2>
+    <table id="t-models"><thead>
+      <tr><th>model</th><th class="num">out tok</th><th class="num">cost</th></tr>
+    </thead><tbody></tbody></table>
+  </div>
+</div>
+
+<footer>rtk-pulse · costs are API-list-price estimates from transcript usage (cache write 1.25×/2×, read 0.1×) ·
+snapshots → ~/.config/rtk-pulse/history.jsonl</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const COLORS = ['#2f81f7','#bc8cff','#3fb950','#d29922','#f85149','#39c5cf','#db61a2','#8b949e'];
+
+function tok(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return String(Math.round(n));
+}
+const usd = n => '$' + n.toFixed(2);
+const shortModel = m => m.replace(/^claude-/, '').replace(/-\d{8}.*$/, '');
+
+Chart.defaults.color = '#8b949e';
+Chart.defaults.borderColor = '#21262d';
+Chart.defaults.font.family = 'ui-monospace, Menlo, monospace';
+
+const dailyChart = new Chart($('chart-daily'), {
+  type: 'bar',
+  data: { labels: [], datasets: [] },
+  options: {
+    responsive: true, animation: false,
+    plugins: { legend: { position: 'bottom', labels: { boxWidth: 10 } } },
+    scales: { x: { stacked: true, grid: { display: false } },
+              y: { stacked: true, ticks: { callback: v => '$' + v } } }
+  }
+});
+const modelChart = new Chart($('chart-model'), {
+  type: 'doughnut',
+  data: { labels: [], datasets: [{ data: [], backgroundColor: COLORS, borderWidth: 0 }] },
+  options: { responsive: true, animation: false, cutout: '62%',
+             plugins: { legend: { position: 'bottom', labels: { boxWidth: 10 } } } }
+});
+
+function render(s) {
+  const t = s.today, m = s.last30;
+  $('c-today-out').textContent = tok(t.out);
+  $('c-today-in').textContent = 'in ' + tok(t.in + t.cr + t.cc5 + t.cc1) + ' (incl. cache)';
+  $('c-today-cost').textContent = usd(t.cost);
+  $('c-today-msgs').textContent = t.n + ' messages';
+  $('c-30d-cost').textContent = usd(m.cost);
+  $('c-7d-cost').textContent = '7d: ' + usd(s.last7.cost);
+  $('c-cache').textContent = (s.cache_hit_rate * 100).toFixed(1) + '%';
+  $('m-cache').style.width = (s.cache_hit_rate * 100).toFixed(1) + '%';
+  if (s.rtk) {
+    $('c-rtk').textContent = tok(s.rtk.total_saved || 0);
+    const pct = s.rtk.avg_savings_pct || 0;
+    $('c-rtk-pct').textContent = pct.toFixed(1) + '% avg savings · ' + (s.rtk.total_commands || 0) + ' cmds';
+    $('m-rtk').style.width = Math.min(100, pct) + '%';
+  } else {
+    $('c-rtk').textContent = 'n/a';
+    $('c-rtk-pct').textContent = 'rtk not found';
+  }
+
+  // daily stacked bars by model
+  const models = Object.keys(s.by_model)
+    .sort((a, b) => s.by_model[b].cost - s.by_model[a].cost).slice(0, 6);
+  dailyChart.data.labels = s.daily.map(d => d.date.slice(5));
+  dailyChart.data.datasets = models.map((mdl, i) => ({
+    label: shortModel(mdl),
+    data: s.daily.map(d => +(d.models[mdl]?.cost || 0).toFixed(2)),
+    backgroundColor: COLORS[i % COLORS.length]
+  }));
+  dailyChart.update();
+
+  modelChart.data.labels = models.map(shortModel);
+  modelChart.data.datasets[0].data = models.map(mdl => +s.by_model[mdl].cost.toFixed(2));
+  modelChart.update();
+
+  const pt = $('t-projects').querySelector('tbody');
+  pt.innerHTML = Object.entries(s.by_project).slice(0, 12).map(([p, e]) =>
+    `<tr><td title="${p}">${p.length > 34 ? '…' + p.slice(-33) : p}</td>` +
+    `<td class="num">${e.n}</td><td class="num">${tok(e.out)}</td>` +
+    `<td class="num">${usd(e.cost)}</td></tr>`).join('') ||
+    '<tr><td class="muted" colspan="4">no data</td></tr>';
+
+  const mt = $('t-models').querySelector('tbody');
+  mt.innerHTML = models.map(mdl =>
+    `<tr><td>${shortModel(mdl)}</td><td class="num">${tok(s.by_model[mdl].out)}</td>` +
+    `<td class="num">${usd(s.by_model[mdl].cost)}</td></tr>`).join('');
+
+  const ll = $('live-list');
+  ll.innerHTML = s.live_sessions.length
+    ? s.live_sessions.map(x => {
+        const ago = Math.max(0, Math.round((Date.now() - new Date(x.ts)) / 60000));
+        return `<li><span class="prj">${x.project}</span>` +
+               ` <span class="tag">${shortModel(x.model)} · ${ago}m ago</span></li>`;
+      }).join('')
+    : '<li class="muted">none</li>';
+
+  $('status').innerHTML = `<span class="dot live" id="dot"></span>live · updated ` +
+    new Date(s.generated_at).toLocaleTimeString();
+}
+
+function connect() {
+  const es = new EventSource('/events');
+  es.onmessage = e => render(JSON.parse(e.data));
+  es.onerror = () => {
+    $('status').innerHTML = '<span class="dot" id="dot"></span>reconnecting…';
+    es.close();
+    setTimeout(connect, 3000);
+  };
+}
+fetch('/api/summary').then(r => r.json()).then(render).catch(() => {});
+connect();
+</script>
+</body>
+</html>

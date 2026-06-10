@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""rtk-pulse — live token-usage observability for Claude Code, rtk-style.
+
+Zero dependencies (Python 3.9+ stdlib only).
+
+Commands:
+  serve   Live web dashboard (SSE) at http://localhost:8377
+  report  rtk-style terminal report with indicator bars
+  save    Append today's usage snapshot to history.jsonl
+  scan    Rebuild/update the incremental index
+
+Data sources:
+  ~/.claude/projects/**/*.jsonl   Claude Code transcripts (token usage per message)
+  rtk gain --format json          rtk token-savings analytics (optional)
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+DATA_DIR = Path(os.environ.get("RTK_PULSE_HOME", Path.home() / ".config" / "rtk-pulse"))
+INDEX_FILE = DATA_DIR / "index.json"
+HISTORY_FILE = DATA_DIR / "history.jsonl"
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_PORT = 8377
+LIVE_WINDOW_MIN = 10  # a project counts as "live" if active within this many minutes
+KEEP_DAYS = 90
+
+# $/MTok (input, output). Cache read = 0.1x input; cache write 5m = 1.25x, 1h = 2x input.
+# Matched top-down by substring against the model id.
+PRICING = [
+    ("fable", 10.0, 50.0),
+    ("opus-4-8", 5.0, 25.0),
+    ("opus-4-7", 5.0, 25.0),
+    ("opus-4-6", 5.0, 25.0),
+    ("opus", 15.0, 75.0),       # opus 4.5 / 4.1 / 4.0 / 3
+    ("sonnet", 3.0, 15.0),
+    ("haiku-4-5", 1.0, 5.0),
+    ("haiku-3-5", 0.8, 4.0),
+    ("haiku", 0.25, 1.25),
+]
+
+
+def rates_for(model):
+    m = model.lower()
+    for sub, i, o in PRICING:
+        if sub in m:
+            return i, o
+    return 3.0, 15.0  # default to sonnet-tier
+
+
+def cost_usd(model, inp, out, cc5, cc1, cr):
+    ri, ro = rates_for(model)
+    return (inp * ri + out * ro + cr * ri * 0.1 + cc5 * ri * 1.25 + cc1 * ri * 2.0) / 1e6
+
+
+# ---------------------------------------------------------------- index / scan
+
+EMPTY = {"in": 0, "out": 0, "cc5": 0, "cc1": 0, "cr": 0, "n": 0, "cost": 0.0}
+
+_lock = threading.Lock()
+
+
+def _load_index():
+    try:
+        with open(INDEX_FILE) as f:
+            idx = json.load(f)
+        if idx.get("version") == 1:
+            return idx
+    except (OSError, ValueError):
+        pass
+    return {"version": 1, "files": {}, "days": {}, "day_projects": {}, "activity": {}}
+
+
+def _save_index(idx):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = INDEX_FILE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(idx, f, separators=(",", ":"))
+    tmp.replace(INDEX_FILE)
+
+
+def _project_name(jsonl_path):
+    name = jsonl_path.parent.name
+    for prefix in ("-Users-tumz-", "-Users-", "-home-"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _bump(bucket, key, inp, out, cc5, cc1, cr, cost):
+    e = bucket.setdefault(key, dict(EMPTY))
+    e["in"] += inp
+    e["out"] += out
+    e["cc5"] += cc5
+    e["cc1"] += cc1
+    e["cr"] += cr
+    e["n"] += 1
+    e["cost"] += cost
+
+
+def _scan_file(path, start_offset, last_key, idx):
+    """Parse appended lines of one transcript; returns (new_offset, last_key)."""
+    project = _project_name(path)
+    with open(path, "rb") as f:
+        f.seek(start_offset)
+        for raw in f:
+            start_offset += len(raw)
+            if not raw.endswith(b"\n"):  # partial line still being written
+                start_offset -= len(raw)
+                break
+            if b'"assistant"' not in raw or b'"usage"' not in raw:
+                continue
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                continue
+            if d.get("type") != "assistant":
+                continue
+            m = d.get("message") or {}
+            usage = m.get("usage") or {}
+            model = m.get("model") or ""
+            if not usage or not model or model == "<synthetic>":
+                continue
+            # Multi-block assistant messages repeat the same usage on adjacent
+            # lines — dedupe on requestId+message.id.
+            key = (d.get("requestId") or "") + "/" + (m.get("id") or "")
+            if key != "/" and key == last_key:
+                continue
+            last_key = key
+            inp = usage.get("input_tokens") or 0
+            out = usage.get("output_tokens") or 0
+            cr = usage.get("cache_read_input_tokens") or 0
+            cc = usage.get("cache_creation_input_tokens") or 0
+            det = usage.get("cache_creation") or {}
+            cc1 = det.get("ephemeral_1h_input_tokens") or 0
+            cc5 = det.get("ephemeral_5m_input_tokens") or 0
+            if cc5 + cc1 == 0:
+                cc5 = cc
+            ts = d.get("timestamp") or ""
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+            except ValueError:
+                continue
+            day = dt.strftime("%Y-%m-%d")
+            c = cost_usd(model, inp, out, cc5, cc1, cr)
+            _bump(idx["days"].setdefault(day, {}), model, inp, out, cc5, cc1, cr, c)
+            _bump(idx["day_projects"].setdefault(day, {}), project, inp, out, cc5, cc1, cr, c)
+            act = idx["activity"].setdefault(project, {"ts": "", "model": "", "session": ""})
+            if ts > act["ts"]:
+                act.update(ts=ts, model=model, session=d.get("sessionId") or path.stem)
+    return start_offset, last_key
+
+
+def refresh_index(force=False):
+    """Incrementally scan transcripts; returns (index, changed: bool)."""
+    with _lock:
+        idx = _load_index()
+        if force:
+            idx = {"version": 1, "files": {}, "days": {}, "day_projects": {}, "activity": {}}
+        changed = False
+        seen = set()
+        for path in sorted(CLAUDE_PROJECTS.glob("*/*.jsonl")):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            p = str(path)
+            seen.add(p)
+            rec = idx["files"].get(p)
+            if rec and rec["size"] == st.st_size and rec["mtime"] == st.st_mtime:
+                continue
+            if rec and st.st_size < rec["offset"]:
+                # truncated file: aggregates can't be subtracted — full rebuild
+                return refresh_index(force=True)
+            offset = rec["offset"] if rec else 0
+            last_key = rec["key"] if rec else ""
+            try:
+                offset, last_key = _scan_file(path, offset, last_key, idx)
+            except OSError:
+                continue
+            idx["files"][p] = {"size": st.st_size, "mtime": st.st_mtime,
+                               "offset": offset, "key": last_key}
+            changed = True
+        gone = [p for p in idx["files"] if p not in seen]
+        for p in gone:
+            del idx["files"][p]
+        cutoff = (datetime.now() - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d")
+        for bucket in ("days", "day_projects"):
+            for day in [d for d in idx[bucket] if d < cutoff]:
+                del idx[bucket][day]
+                changed = True
+        if changed or force:
+            _save_index(idx)
+        return idx, changed
+
+
+# ---------------------------------------------------------------- summaries
+
+def _sum(entries):
+    tot = dict(EMPTY)
+    for e in entries:
+        for k in tot:
+            tot[k] += e[k]
+    return tot
+
+
+def _window(idx, days):
+    cutoff = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    by_model, by_project, daily = {}, {}, []
+    for day in sorted(idx["days"]):
+        if day < cutoff:
+            continue
+        models = idx["days"][day]
+        tot = _sum(models.values())
+        daily.append({"date": day, "models": models, **tot})
+        for mdl, e in models.items():
+            t = by_model.setdefault(mdl, dict(EMPTY))
+            for k in EMPTY:
+                t[k] += e[k]
+    for day, projects in idx["day_projects"].items():
+        if day < cutoff:
+            continue
+        for prj, e in projects.items():
+            t = by_project.setdefault(prj, dict(EMPTY))
+            for k in EMPTY:
+                t[k] += e[k]
+    return {"daily": daily, "by_model": by_model, "by_project": by_project,
+            "total": _sum(m for d in daily for m in [d]) if daily else dict(EMPTY)}
+
+
+def rtk_gain():
+    try:
+        out = subprocess.run(["rtk", "gain", "--format", "json"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            return json.loads(out.stdout).get("summary")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def build_summary(idx):
+    now = datetime.now().astimezone()
+    today = now.strftime("%Y-%m-%d")
+    w30 = _window(idx, 30)
+    w7 = _window(idx, 7)
+    today_models = idx["days"].get(today, {})
+    today_tot = _sum(today_models.values())
+    live, cutoff = [], (now - timedelta(minutes=LIVE_WINDOW_MIN))
+    for prj, act in idx["activity"].items():
+        try:
+            ts = datetime.fromisoformat(act["ts"].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            live.append({"project": prj, "ts": act["ts"], "model": act["model"]})
+    live.sort(key=lambda x: x["ts"], reverse=True)
+    t30 = w30["total"]
+    cache_denom = t30["in"] + t30["cr"] + t30["cc5"] + t30["cc1"]
+    return {
+        "generated_at": now.isoformat(timespec="seconds"),
+        "today": {**today_tot, "models": today_models},
+        "last7": w7["total"],
+        "last30": t30,
+        "daily": w30["daily"],
+        "by_model": w30["by_model"],
+        "by_project": dict(sorted(w30["by_project"].items(),
+                                  key=lambda kv: kv[1]["cost"], reverse=True)[:20]),
+        "cache_hit_rate": (t30["cr"] / cache_denom) if cache_denom else 0.0,
+        "live_sessions": live[:10],
+        "rtk": rtk_gain(),
+    }
+
+
+def save_snapshot(summary=None):
+    if summary is None:
+        idx, _ = refresh_index()
+        summary = build_summary(idx)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    line = {
+        "ts": summary["generated_at"],
+        "date": summary["generated_at"][:10],
+        "today": {k: v for k, v in summary["today"].items() if k != "models"},
+        "last30_cost": summary["last30"]["cost"],
+        "cache_hit_rate": summary["cache_hit_rate"],
+        "rtk_saved": (summary["rtk"] or {}).get("total_saved"),
+    }
+    with open(HISTORY_FILE, "a") as f:
+        f.write(json.dumps(line, separators=(",", ":")) + "\n")
+    return line
+
+
+# ---------------------------------------------------------------- terminal report
+
+def fmt_tok(n):
+    if n >= 1e9:
+        return f"{n / 1e9:.1f}B"
+    if n >= 1e6:
+        return f"{n / 1e6:.1f}M"
+    if n >= 1e3:
+        return f"{n / 1e3:.1f}K"
+    return str(int(n))
+
+
+def bar(frac, width=24):
+    full = max(0, min(width, round(frac * width)))
+    return "█" * full + "░" * (width - full)
+
+
+def cmd_report(days):
+    idx, _ = refresh_index()
+    s = build_summary(idx)
+    t, today = s["last30"], s["today"]
+    print("rtk-pulse — Claude Code Token Usage")
+    print("═" * 64)
+    print(f"Today:      in {fmt_tok(today['in'] + today['cr'] + today['cc5'] + today['cc1']):>8}"
+          f"   out {fmt_tok(today['out']):>8}   ≈ ${today['cost']:.2f}   ({today['n']} msgs)")
+    print(f"Last 30d:   in {fmt_tok(t['in'] + t['cr'] + t['cc5'] + t['cc1']):>8}"
+          f"   out {fmt_tok(t['out']):>8}   ≈ ${t['cost']:.2f}   ({t['n']} msgs)")
+    print(f"Cache hits: {bar(s['cache_hit_rate'])} {s['cache_hit_rate'] * 100:.1f}%")
+    if s["rtk"]:
+        r = s["rtk"]
+        pct = r.get("avg_savings_pct") or 0
+        print(f"rtk saved:  {bar(pct / 100)} {pct:.1f}%  ({fmt_tok(r.get('total_saved') or 0)} tokens)")
+    print()
+    print(f"By Model (last {days}d)")
+    print("─" * 64)
+    by_model = sorted(s["by_model"].items(), key=lambda kv: kv[1]["cost"], reverse=True)
+    max_cost = max((e["cost"] for _, e in by_model), default=1) or 1
+    for mdl, e in by_model:
+        print(f"  {mdl:<28} ${e['cost']:>8.2f}  {bar(e['cost'] / max_cost, 16)}  "
+              f"out {fmt_tok(e['out'])}")
+    print()
+    print(f"By Project (top 10, last {days}d)")
+    print("─" * 64)
+    projects = list(s["by_project"].items())[:10]
+    max_cost = max((e["cost"] for _, e in projects), default=1) or 1
+    for prj, e in projects:
+        name = prj if len(prj) <= 36 else "…" + prj[-35:]
+        print(f"  {name:<38} ${e['cost']:>7.2f}  {bar(e['cost'] / max_cost, 12)}")
+    print()
+    days_rows = s["daily"][-14:]
+    if days_rows:
+        print("Daily cost (last 14d)")
+        print("─" * 64)
+        max_c = max((d["cost"] for d in days_rows), default=1) or 1
+        for d in days_rows:
+            print(f"  {d['date']}  ${d['cost']:>7.2f}  {bar(d['cost'] / max_c, 28)}")
+    if s["live_sessions"]:
+        print()
+        print("Live now: " + ", ".join(x["project"] for x in s["live_sessions"]))
+
+
+# ---------------------------------------------------------------- web server
+
+def _fs_state():
+    """Cheap change detector: (file count, total size, max mtime)."""
+    n = total = newest = 0
+    try:
+        for d in os.scandir(CLAUDE_PROJECTS):
+            if not d.is_dir():
+                continue
+            for f in os.scandir(d.path):
+                if f.name.endswith(".jsonl"):
+                    st = f.stat()
+                    n += 1
+                    total += st.st_size
+                    newest = max(newest, st.st_mtime)
+    except OSError:
+        pass
+    return (n, total, newest)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "rtk-pulse"
+
+    def log_message(self, *args):
+        pass
+
+    def _send(self, code, ctype, body):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            try:
+                body = (SCRIPT_DIR / "dashboard.html").read_bytes()
+            except OSError:
+                body = b"dashboard.html not found"
+            self._send(200, "text/html; charset=utf-8", body)
+        elif self.path == "/api/summary":
+            idx, _ = refresh_index()
+            body = json.dumps(build_summary(idx)).encode()
+            self._send(200, "application/json", body)
+        elif self.path == "/events":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            last_state = None
+            last_beat = 0.0
+            try:
+                while True:
+                    state = _fs_state()
+                    if state != last_state:
+                        last_state = state
+                        idx, _ = refresh_index()
+                        payload = json.dumps(build_summary(idx))
+                        self.wfile.write(f"data: {payload}\n\n".encode())
+                        self.wfile.flush()
+                    elif time.time() - last_beat > 15:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        last_beat = time.time()
+                    time.sleep(3)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        else:
+            self._send(404, "text/plain", b"not found")
+
+
+def _snapshot_loop(interval_min=30):
+    while True:
+        time.sleep(interval_min * 60)
+        try:
+            save_snapshot()
+        except OSError:
+            pass
+
+
+def cmd_serve(port, open_browser):
+    print("Indexing transcripts (first run may take a moment)...")
+    refresh_index()
+    save_snapshot()
+    threading.Thread(target=_snapshot_loop, daemon=True).start()
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://localhost:{port}"
+    print(f"rtk-pulse dashboard → {url}")
+    if open_browser:
+        subprocess.Popen(["open", url] if sys.platform == "darwin" else ["xdg-open", url])
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nbye")
+
+
+# ---------------------------------------------------------------- cli
+
+def main():
+    ap = argparse.ArgumentParser(prog="rtk-pulse", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    p = sub.add_parser("serve", help="live web dashboard")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--open", action="store_true", help="open browser")
+    p = sub.add_parser("report", help="terminal usage report")
+    p.add_argument("--days", type=int, default=30)
+    sub.add_parser("save", help="append usage snapshot to history.jsonl")
+    p = sub.add_parser("scan", help="update the incremental index")
+    p.add_argument("--force", action="store_true", help="full rebuild")
+    args = ap.parse_args()
+
+    if args.cmd == "serve":
+        cmd_serve(args.port, args.open)
+    elif args.cmd == "report":
+        cmd_report(args.days)
+    elif args.cmd == "save":
+        line = save_snapshot()
+        print(json.dumps(line, indent=2))
+    elif args.cmd == "scan":
+        t0 = time.time()
+        idx, changed = refresh_index(force=getattr(args, "force", False))
+        print(f"indexed {len(idx['files'])} files, {len(idx['days'])} days "
+              f"({'changed' if changed else 'no change'}, {time.time() - t0:.1f}s)")
+    else:
+        ap.print_help()
+
+
+if __name__ == "__main__":
+    main()

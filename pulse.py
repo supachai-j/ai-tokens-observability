@@ -492,15 +492,24 @@ def fx_thb():
         return FX_FALLBACK_THB, "fallback"
 
 
+_rtk_mem = {"ts": 0.0, "data": None}
+RTK_TTL = 60  # seconds between rtk subprocess calls
+
+
 def rtk_gain():
+    """Run `rtk gain` and return the summary dict; cached for RTK_TTL seconds."""
+    if _rtk_mem["data"] is not None and time.time() - _rtk_mem["ts"] < RTK_TTL:
+        return _rtk_mem["data"]
+    data = None
     try:
         out = subprocess.run(["rtk", "gain", "--format", "json"],
                              capture_output=True, text=True, timeout=10)
         if out.returncode == 0:
-            return json.loads(out.stdout).get("summary")
+            data = json.loads(out.stdout).get("summary")
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
-    return None
+    _rtk_mem.update(ts=time.time(), data=data)
+    return data
 
 
 def build_summary(idx, project=None, model=None, days=30, source=None):

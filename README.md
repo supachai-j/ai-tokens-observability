@@ -38,19 +38,53 @@ Parsing is **incremental**: a byte-offset index (`~/.config/rtk-pulse/index.json
 means only appended transcript data is re-read. A cold scan of ~300 MB takes
 under a second; live updates are near-free.
 
+## Installation
+
+**Requirements**
+
+- Python **3.9+** (stdlib only — no `pip install` needed)
+- Claude Code installed locally (transcripts under `~/.claude/projects/`)
+- macOS or Linux
+- Optional: [rtk](https://github.com/) on `PATH` for the savings panel
+  (without it the panel just shows `n/a`)
+- Internet access only for the Chart.js CDN and the USD→THB rate
+  (both degrade gracefully offline)
+
+**Install**
+
+```bash
+git clone https://github.com/supachai-j/ai-tokens-observability.git
+cd ai-tokens-observability
+python3 pulse.py scan        # build the index (first run, <1s per ~300MB)
+python3 pulse.py serve --open
+```
+
+That's it — no virtualenv, no dependencies. The dashboard is at
+<http://localhost:8377> (change with `--port`). It binds to `127.0.0.1`
+only, so nothing is exposed to the network.
+
+**Optional setup**
+
+```bash
+# shell alias
+alias pulse='python3 ~/workspace/rtk/pulse.py'
+
+# pin a custom USD->THB rate (skips the live FX lookup)
+export RTK_PULSE_THB=33.0
+
+# relocate the data dir (index, history, fx cache); default ~/.config/rtk-pulse
+export RTK_PULSE_HOME=~/somewhere/else
+```
+
+**Uninstall** — delete the clone and `~/.config/rtk-pulse/`.
+
 ## Usage
 
 ```bash
 python3 pulse.py serve --open      # dashboard at http://localhost:8377
-python3 pulse.py report            # terminal report
+python3 pulse.py report [--days N] # terminal report
 python3 pulse.py save              # snapshot today's usage to history.jsonl
 python3 pulse.py scan [--force]    # (re)build the index
-```
-
-Optional alias:
-
-```bash
-alias pulse='python3 ~/workspace/rtk/pulse.py'
 ```
 
 ### Auto-snapshot via Claude Code hook (optional)
@@ -82,6 +116,12 @@ repeat the same `usage` on adjacent lines, so events are deduped on
 ## Files
 
 ```
-pulse.py         CLI + collector + HTTP/SSE server (stdlib only)
-dashboard.html   dark-theme dashboard (Chart.js via CDN)
+pulse.py            CLI + collector + HTTP/SSE server (stdlib only)
+dashboard.html      light/dark dashboard (Chart.js via CDN)
+docs/ARCHITECTURE.md  design & architecture overview
 ```
+
+## Documentation
+
+- [Architecture overview](docs/ARCHITECTURE.md) — components, data flow,
+  index design, cost model, API, and design decisions.

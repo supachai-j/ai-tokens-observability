@@ -167,6 +167,7 @@
   .b-tool { color: var(--amber); border-color: var(--amber); }
   .b-mcp { color: var(--purple); border-color: var(--purple); }
   .b-usage { color: var(--text); }
+  .b-local { color: var(--accent); border-color: var(--accent); }
   .b-err { color: var(--red); border-color: var(--red); }
   #t-trace td { font-size: 12px; }
   #t-trace .name { color: var(--text); }
@@ -693,7 +694,7 @@ function renderFleet(data) {
   const rows = nodes.map(n => {
     const isLocal = n.local;
     const nodeName = esc(n.node) + (isLocal
-      ? ' <span class="b" style="color:var(--accent);border-color:var(--accent)">this machine</span>' : '');
+      ? ' <span class="b b-local">this machine</span>' : '');
     let updated = '—';
     if (isLocal) {
       updated = '<span style="color:var(--green)">live</span>';

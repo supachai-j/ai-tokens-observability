@@ -3530,8 +3530,10 @@ class TestBuildFleet(unittest.TestCase):
         idx = pulse._empty_index()
         with patch("pulse.NODES_DIR", self.nodes_dir):
             result = pulse.build_fleet(idx)
-        for k in ("generated_at", "days", "local_node", "nodes", "fleet", "fleet_daily"):
+        for k in ("generated_at", "days", "local_node", "nodes", "fleet"):
             self.assertIn(k, result, f"key '{k}' missing from build_fleet result")
+        self.assertNotIn("fleet_daily", result,
+                         "fleet_daily deferred to C19 — must not appear in C18 payload")
 
 
 class TestHttpFleet(unittest.TestCase):
@@ -3572,12 +3574,14 @@ class TestHttpFleet(unittest.TestCase):
             return json.loads(r.read()), r
 
     def test_api_fleet_returns_json(self):
-        """/api/fleet → 200, application/json, required keys present."""
+        """/api/fleet → 200, application/json, required keys present; fleet_daily absent (C18)."""
         data, resp = self._json("/api/fleet")
         self.assertEqual(resp.status, 200)
         self.assertIn("application/json", resp.headers.get("Content-Type", ""))
-        for k in ("nodes", "fleet", "local_node", "fleet_daily"):
+        for k in ("nodes", "fleet", "local_node"):
             self.assertIn(k, data, f"key '{k}' missing from /api/fleet")
+        self.assertNotIn("fleet_daily", data,
+                         "fleet_daily deferred to C19 — must not appear in C18 response")
 
     def test_api_fleet_days_clamp_large(self):
         """/api/fleet?days=9999 → days clamped to KEEP_DAYS."""

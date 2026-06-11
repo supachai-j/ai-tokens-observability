@@ -1501,35 +1501,12 @@ def build_fleet(idx, days=30):
     fleet_today = _sum(n["today"] for n in node_stats) if node_stats else dict(EMPTY)
     fleet_window = _sum(n["window"] for n in node_stats) if node_stats else dict(EMPTY)
 
-    # --- 5. fleet_daily: per-day cost per node (within window)
-    all_days = sorted({
-        d for nd in nodes_by_name.values()
-        for d in (nd.get("days") or {})
-        if d >= cutoff
-    })
-    fleet_daily = []
-    for day in all_days:
-        nodes_cost = {}
-        for name, nd in nodes_by_name.items():
-            nd_days = nd.get("days") or {}
-            if day not in nd_days or not isinstance(nd_days[day], dict):
-                continue
-            day_cost = sum(
-                e.get("cost", 0) for e in nd_days[day].values()
-                if isinstance(e, dict)
-            )
-            if day_cost:
-                nodes_cost[name] = day_cost
-        if nodes_cost:
-            fleet_daily.append({"date": day, "nodes": nodes_cost})
-
     return {
         "generated_at": now.isoformat(timespec="seconds"),
         "days": days,
         "local_node": local_name,
         "nodes": node_stats,
         "fleet": {"today": fleet_today, "window": fleet_window},
-        "fleet_daily": fleet_daily,
     }
 
 

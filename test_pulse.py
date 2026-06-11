@@ -2691,6 +2691,73 @@ class TestBuildSpike(unittest.TestCase):
         sp = self._spike([10.0, 10.0, 10.0, 10.0, 10.0], 25.0)
         self.assertFalse(sp["triggered"])
 
+    # --- attribution tests ---
+
+    def _make_idx_two_projects(self, projA_cost, projB_cost, prior_costs):
+        """Index with two projects today (projA, projB) + single-project prior days."""
+        from datetime import datetime as _dt, timedelta as _td
+        idx = pulse._empty_index()
+        today = _dt.now().strftime("%Y-%m-%d")
+        if projA_cost > 0:
+            idx["days"].setdefault(today, {})["projA"] = {
+                "claude-sonnet-4-5": {
+                    "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                    "n": 1, "cost": projA_cost}}
+        if projB_cost > 0:
+            idx["days"].setdefault(today, {})["projB"] = {
+                "claude-sonnet-4-5": {
+                    "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                    "n": 1, "cost": projB_cost}}
+        for i, cost in enumerate(prior_costs, start=1):
+            if cost > 0:
+                day = (_dt.now() - _td(days=i)).strftime("%Y-%m-%d")
+                idx["days"][day] = {
+                    "projA": {"claude-sonnet-4-5": {
+                        "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                        "n": 1, "cost": cost}}}
+        return idx
+
+    def test_attribution_top_project_identified(self):
+        """projA $8 > projB $2 → top_project='projA', share≈0.8."""
+        from datetime import datetime as _dt
+        idx = self._make_idx_two_projects(8.0, 2.0, [2.0, 2.0, 2.0, 2.0, 2.0])
+        now = _dt.now().astimezone()
+        today_cost = 10.0
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            sp = pulse._build_spike(idx, now, today_cost, None, None, None)
+        self.assertEqual(sp["top_project"], "projA")
+        self.assertAlmostEqual(sp["top_project_cost"], 8.0, places=3)
+        self.assertAlmostEqual(sp["top_project_share"], 0.8, places=3)
+
+    def test_attribution_none_when_project_filter_active(self):
+        """When project filter is set, attribution is skipped (top_project=None)."""
+        from datetime import datetime as _dt
+        idx = self._make_idx_two_projects(8.0, 2.0, [2.0, 2.0, 2.0])
+        now = _dt.now().astimezone()
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            sp = pulse._build_spike(idx, now, 8.0, "projA", None, None)
+        self.assertIsNone(sp["top_project"])
+        self.assertIsNone(sp["top_project_share"])
+
+    def test_attribution_no_today_data(self):
+        """No today data → top_project=None, top_project_share=None."""
+        from datetime import datetime as _dt
+        idx = pulse._empty_index()
+        now = _dt.now().astimezone()
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            sp = pulse._build_spike(idx, now, 0.0, None, None, None)
+        self.assertIsNone(sp["top_project"])
+        self.assertIsNone(sp["top_project_share"])
+
+    def test_attribution_keys_always_present(self):
+        """top_project, top_project_cost, top_project_share always in result."""
+        sp = self._spike([2.0, 2.0, 2.0], 10.0)
+        for key in ("top_project", "top_project_cost", "top_project_share"):
+            self.assertIn(key, sp, f"attribution key '{key}' missing from spike dict")
+
 
 # ---------------------------------------------------------------------------
 # TestBuildSummarySpike — build_summary() includes "spike" key
@@ -2727,7 +2794,7 @@ class TestBuildSummarySpike(unittest.TestCase):
         self.assertIn("spike", s)
 
     def test_spike_has_required_keys(self):
-        """spike sub-object has all documented keys."""
+        """spike sub-object has all documented keys including attribution."""
         idx = self._make_idx()
         with patch("pulse.rtk_gain", return_value=None), \
              patch("pulse.fx_thb", return_value=(32.0, "test")), \
@@ -2736,7 +2803,8 @@ class TestBuildSummarySpike(unittest.TestCase):
             s = pulse.build_summary(idx)
         sp = s["spike"]
         for key in ("today_cost", "baseline", "ratio", "multiple", "floor",
-                    "window_days", "active_days", "enabled", "triggered", "date"):
+                    "window_days", "active_days", "enabled", "triggered", "date",
+                    "top_project", "top_project_cost", "top_project_share"):
             self.assertIn(key, sp, f"spike key '{key}' missing")
 
     def test_spike_triggered_when_anomalous(self):
@@ -2764,7 +2832,8 @@ class TestNotifySpike(unittest.TestCase):
         self.tmp.cleanup()
 
     def _summary(self, triggered=True, date="2026-06-11",
-                 today_cost=10.0, ratio=5.0, baseline=2.0, window_days=7):
+                 today_cost=10.0, ratio=5.0, baseline=2.0, window_days=7,
+                 top_project=None, top_project_cost=0.0, top_project_share=None):
         return {
             "spike": {
                 "triggered": triggered,
@@ -2773,6 +2842,9 @@ class TestNotifySpike(unittest.TestCase):
                 "ratio": ratio,
                 "baseline": baseline,
                 "window_days": window_days,
+                "top_project": top_project,
+                "top_project_cost": top_project_cost,
+                "top_project_share": top_project_share,
             }
         }
 
@@ -2849,6 +2921,107 @@ class TestNotifySpike(unittest.TestCase):
             pulse.notify_spike(None)
             pulse.notify_spike({})
             mock_run.assert_not_called()
+
+    # --- attribution in notification message ---
+
+    def test_attribution_appears_in_message(self):
+        """When top_project is set, project name and cost appear in osascript arg."""
+        summary = self._summary(
+            top_project="my-project", top_project_cost=8.0, top_project_share=0.8)
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"), \
+             patch("pulse.DATA_DIR", self.data_dir), \
+             patch("pulse.SPIKE_ALERT_FILE", self.alert_file):
+            pulse.notify_spike(summary)
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]  # argv list
+        script_arg = cmd[2]  # the -e argument
+        self.assertIn("my-project", script_arg)
+        self.assertIn("$8.00", script_arg)
+
+    def test_no_attribution_when_top_project_none(self):
+        """top_project=None → no attribution clause in message."""
+        summary = self._summary(top_project=None)
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"), \
+             patch("pulse.DATA_DIR", self.data_dir), \
+             patch("pulse.SPIKE_ALERT_FILE", self.alert_file):
+            pulse.notify_spike(summary)
+        mock_run.assert_called_once()
+        script_arg = mock_run.call_args[0][0][2]
+        self.assertNotIn("Top contributor", script_arg)
+
+    def test_long_project_name_truncated(self):
+        """Project names > 40 chars are truncated with leading ellipsis."""
+        long_name = "a" * 50
+        summary = self._summary(top_project=long_name, top_project_cost=5.0,
+                                top_project_share=0.5)
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"), \
+             patch("pulse.DATA_DIR", self.data_dir), \
+             patch("pulse.SPIKE_ALERT_FILE", self.alert_file):
+            pulse.notify_spike(summary)
+        script_arg = mock_run.call_args[0][0][2]
+        # The raw 50-char name must NOT appear; the truncated form must
+        self.assertNotIn("a" * 50, script_arg)
+        self.assertIn("…", script_arg)
+
+    # --- security: AppleScript escaping ---
+
+    def test_native_notify_escapes_double_quote(self):
+        """A `"` in msg must be escaped to `\\"` in the osascript -e string."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            pulse._native_notify('a"b')
+        cmd = mock_run.call_args[0][0]
+        script_arg = cmd[2]
+        # Must contain the escaped form, not a bare quote that closes the literal
+        self.assertIn('\\"', script_arg)
+        # The resulting AppleScript literal must start and end with unescaped quotes
+        # (i.e. the message content does not contain a bare unescaped " mid-string)
+        inner = script_arg[len('display notification "'):]
+        # count unescaped quotes — there should be exactly one (the closing quote
+        # before " with title ..."); a mid-string bare " would add more
+        # Simpler check: the escaped sequence is present and no raw " in the content
+        content_start = script_arg.find('"') + 1
+        content_end = script_arg.rfind('" with title')
+        content = script_arg[content_start:content_end]
+        self.assertNotIn('"', content.replace('\\"', ''))
+
+    def test_native_notify_escapes_backslash(self):
+        """A backslash in msg must be doubled to \\\\ in the osascript -e string."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            pulse._native_notify('a\\c')
+        script_arg = mock_run.call_args[0][0][2]
+        self.assertIn('\\\\', script_arg)
+
+    def test_native_notify_combined_escape(self):
+        """msg with both `"` and `\\` is escaped correctly in one call."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            pulse._native_notify('a"b\\c')
+        script_arg = mock_run.call_args[0][0][2]
+        self.assertIn('\\"', script_arg)
+        self.assertIn('\\\\', script_arg)
+
+    def test_e2e_evil_project_name_escaped(self):
+        """End-to-end: a malicious project name with `"` ends up safely escaped."""
+        evil = 'evil" & do shell script "x'
+        summary = self._summary(top_project=evil, top_project_cost=9.0,
+                                top_project_share=0.9)
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"), \
+             patch("pulse.DATA_DIR", self.data_dir), \
+             patch("pulse.SPIKE_ALERT_FILE", self.alert_file):
+            pulse.notify_spike(summary)
+        script_arg = mock_run.call_args[0][0][2]
+        # The raw unescaped quote from the evil project name must not appear
+        # (the only unescaped quotes are the outer delimiters of the AS string)
+        content_start = script_arg.find('"') + 1
+        content_end = script_arg.rfind('" with title')
+        content = script_arg[content_start:content_end]
+        self.assertNotIn('"', content.replace('\\"', ''))
 
 
 # ---------------------------------------------------------------------------

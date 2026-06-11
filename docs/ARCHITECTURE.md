@@ -254,8 +254,26 @@ updates the state file. A month rollover resets the alerted level.
 
 `notify_spike` reads `spike.triggered` from the summary; if true and today's
 date has not already been alerted (state in `~/.config/rtk-pulse/spike_alert.json`),
-it fires a native notification. Fires at most once per calendar day. Both
-notifiers share the `_native_notify(msg)` helper (osascript on macOS,
+it fires a native notification. Fires at most once per calendar day.
+
+**Spike attribution:** `_build_spike` also computes the top contributing project
+for today (skipped when a project filter is active). The returned spike dict gains
+three fields: `top_project` (project name, or `None`), `top_project_cost` (its
+USD cost for today), and `top_project_share` (fraction 0‥1). The native
+notification message appends `— top: <project> ($N.NN)` when a top project is
+available; long names (>40 chars) are truncated with a leading ellipsis. The
+dashboard spike banner likewise appends `Top contributor: <project> (NN%)`.
+No index schema change; `INDEX_VERSION` v3 unchanged.
+
+**`_native_notify` security hardening:** The osascript path interpolates `msg`
+into an AppleScript string literal. Since project names (user-derived filesystem
+strings) now appear in the message, `_native_notify` escapes `msg` before
+interpolation: backslashes are doubled (`\\` → `\\\\`) and double-quotes are
+escaped (`"` → `\"`). This prevents a malicious project name from breaking or
+injecting into the AppleScript. The notify-send path is unaffected (argv, no
+shell). All notifiers call `_native_notify` directly so hardening is centralized.
+
+Both notifiers share the `_native_notify(msg)` helper (osascript on macOS,
 notify-send on Linux). Spike detection is **runtime-only** — nothing new is
 persisted to `index.json`; `_build_spike` aggregates over the existing
 `idx["days"]` structure. The index version stays at 3.

@@ -711,6 +711,24 @@ def _build_spike(idx, now, today_cost, project, model, source):
         and today_cost >= floor
         and today_cost >= mult * baseline
     )
+    # Attribution: top contributing project for today (skipped when project filter active)
+    top_project, top_project_cost = None, 0.0
+    if not project:
+        proj_today = {}
+        for prj, models in idx["days"].get(today_str, {}).items():
+            for mdl, e in models.items():
+                if model and mdl != model:
+                    continue
+                if source and model_source(mdl) != source:
+                    continue
+                proj_today[prj] = proj_today.get(prj, 0.0) + e["cost"]
+        if proj_today:
+            top_project, top_project_cost = max(proj_today.items(), key=lambda kv: kv[1])
+    top_project_share = (
+        round(top_project_cost / today_cost, 4)
+        if top_project and today_cost > 0
+        else None
+    )
     return {
         "today_cost": round(today_cost, 4),
         "baseline": round(baseline, 4),
@@ -722,6 +740,9 @@ def _build_spike(idx, now, today_cost, project, model, source):
         "enabled": enabled,
         "triggered": triggered,
         "date": today_str,
+        "top_project": top_project,
+        "top_project_cost": round(top_project_cost, 4),
+        "top_project_share": top_project_share,
     }
 
 
@@ -1147,11 +1168,15 @@ def _native_notify(msg):
     """
     try:
         if sys.platform == "darwin":
+            # Escape for an AppleScript string literal so user-derived content
+            # (e.g. project names) cannot break or inject into the script.
+            safe = msg.replace("\\", "\\\\").replace('"', '\\"')
             subprocess.run(
                 ["osascript", "-e",
-                 f'display notification "{msg}" with title "AI Tokens Observability"'],
+                 f'display notification "{safe}" with title "AI Tokens Observability"'],
                 timeout=5, capture_output=True)
         elif shutil.which("notify-send"):
+            # notify-send receives argv, no shell involved — already safe.
             subprocess.run(
                 ["notify-send", "AI Tokens Observability", msg],
                 timeout=5, capture_output=True)
@@ -1219,6 +1244,11 @@ def notify_spike(summary):
         pass
     msg = (f"Today ${sp.get('today_cost', 0):.2f} is {sp.get('ratio') or 0:.1f}x "
            f"the {sp.get('window_days', 7)}-day average (${sp.get('baseline', 0):.2f})")
+    tp = sp.get("top_project")
+    if tp:
+        disp = tp if len(tp) <= 40 else "…" + tp[-39:]
+        disp = disp.replace("\n", " ").replace("\r", " ")
+        msg += f" — top: {disp} (${sp.get('top_project_cost', 0):.2f})"
     _native_notify(msg)
 
 

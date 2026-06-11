@@ -455,10 +455,14 @@ function render(s) {
       let dismissed = false;
       try { dismissed = localStorage.getItem('spikeDismiss') === dismissKey; } catch (e) {}
       if (!dismissed) {
-        $('sb-msg').textContent =
-          '⚠ Cost spike — today ' + usd(sp.today_cost) + ' is ' +
+        let txt = '⚠ Cost spike — today ' + usd(sp.today_cost) + ' is ' +
           (sp.ratio || 0).toFixed(1) + 'x your ' + sp.window_days +
           '-day average (' + usd(sp.baseline) + ').';
+        if (sp.top_project) {
+          txt += ' Top contributor: ' + sp.top_project +
+            ' (' + Math.round((sp.top_project_share || 0) * 100) + '%).';
+        }
+        $('sb-msg').textContent = txt;
         const color = (sp.ratio || 0) >= 5 ? cssVar('--red') : cssVar('--amber');
         sbanner.style.background = color + '22';
         sbanner.style.borderColor = color;

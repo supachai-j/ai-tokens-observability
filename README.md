@@ -116,6 +116,7 @@ export RTK_PULSE_BUDGET_ALERT=80,100
 
 # cost-spike alert: warn when today's spend >= N× the trailing 7-day average
 # (only over active days; gated by a $ floor). Default 3x / $5. Set 0 to disable.
+# The alert message names the top contributing project so you know where to look.
 export RTK_PULSE_SPIKE=3
 export RTK_PULSE_SPIKE_MIN=5
 

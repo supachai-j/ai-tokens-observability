@@ -2294,6 +2294,13 @@ class TestBuildForecast(unittest.TestCase):
         self.assertEqual(out["days_in_month"], 28)
         self.assertAlmostEqual(out["projected"], 20.0 / 10 * 28, places=3)
 
+    def test_day_equals_min_forecast_day_projects(self):
+        """Day == MIN_FORECAST_DAY (day 3) must project — boundary is `<`, not `<=`."""
+        now = self._dt(2026, 6, 3)
+        fc = pulse._build_forecast(30.0, None, now)
+        self.assertIsNotNone(fc["projected"])          # 30/3*30 = 300.0
+        self.assertAlmostEqual(fc["projected"], 300.0, places=2)
+
     def test_result_keys_present(self):
         """All documented keys are present."""
         now = self._dt(2026, 6, 10)

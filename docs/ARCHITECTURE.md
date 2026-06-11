@@ -269,6 +269,29 @@ existing `OSError → "dashboard.html not found"` fallback in `do_GET`.
 `python3 pulse.py serve` from a clone continues to work without any
 `pyproject.toml` involvement.
 
+## Security model
+
+The tool was designed for **local, single-user use** from the start; the
+following properties were verified by code audit and locked in with regression
+tests (C12):
+
+| Property | Implementation |
+|---|---|
+| **Loopback-only bind** | `ThreadingHTTPServer(("127.0.0.1", port), Handler)` — never `0.0.0.0`. Usage data cannot be reached from the network. |
+| **Trace path exact-match allowlist** | `build_trace` calls `_discover()` to build the set of known session files and rejects any `path_str` not in that set with `{"error": "unknown session"}`. No directory traversal (`../../`) or arbitrary absolute path (`/etc/passwd`) can cause a file read. |
+| **HTML escaping** | All user-derived strings rendered in the dashboard go through `esc()` (replaces `&`, `<`, `>`, `"`) or are set via `element.textContent` (browser-native escaping). Project names, model names, session paths — none reach innerHTML unescaped. |
+| **Budget notification — no shell injection** | The `osascript`/`notify-send` message is built from `pct` (float), `limit` (float), and `month` (YYYY-MM string derived from `datetime.now().strftime`). No user-supplied string reaches the notification command. |
+| **`days` query parameter clamped** | `max(1, min(KEEP_DAYS, int(days)))` with a `ValueError` fallback of 30. A negative or arbitrarily large value cannot cause an unbounded scan. |
+| **No telemetry / outbound** | The only outbound calls are the Chart.js CDN fetch by the browser (optional; works offline with a cached copy) and the FX rate lookup (`RTK_PULSE_THB` overrides it). No usage data leaves the machine. |
+| **Data stays local** | All state is written to `~/.config/rtk-pulse/` (or `RTK_PULSE_HOME`). Nothing is written elsewhere; the server never reads from outside `_discover()`'s paths. |
+
+**Honest limitations:** a session trace reads the full session file into memory
+(fine for local single-user; session files are typically ≤1 MB). There is no
+authentication layer — the loopback bind is the only access control; any
+process on the same machine can reach the server. This is appropriate for a
+developer observability tool and would need to change for any multi-user or
+shared-host deployment.
+
 ## Limitations / future ideas
 
 - Costs assume API list prices; subscription plans (Pro/Max) bill differently.

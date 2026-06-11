@@ -191,6 +191,16 @@ above (snapshot after every session) with a weekly cron for the digest:
 0 9 * * 1  rtk-pulse digest --format json >> ~/rtk-pulse-digest.jsonl
 ```
 
+## Security & privacy
+
+The server binds to `127.0.0.1` only — no data is exposed beyond your machine.
+All state is stored in `~/.config/rtk-pulse/` (or `RTK_PULSE_HOME`). The only
+outbound calls are the Chart.js CDN fetch by your browser and an optional
+USD→THB exchange-rate lookup — both degrade gracefully offline, and neither
+sends usage data anywhere. Session-trace file access is restricted to paths
+discovered by the scanner; arbitrary path traversal is rejected.
+See [Architecture — Security model](docs/ARCHITECTURE.md#security-model) for details.
+
 ## Cost model
 
 Estimates use API list prices per MTok — e.g. Fable 5 $10/$50 · Opus

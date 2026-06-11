@@ -1420,6 +1420,26 @@ class TestHttpRoutes(unittest.TestCase):
             self._get("/nope")
         self.assertEqual(ctx.exception.code, 404)
 
+    def test_api_trace_absolute_path_returns_error_json(self):
+        """/api/trace?path=/etc/passwd → 200 with JSON error (no file read, no traversal)."""
+        data, resp = self._json("/api/trace?path=/etc/passwd")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("application/json", resp.headers.get("Content-Type", ""))
+        self.assertEqual(data.get("error"), "unknown session",
+                         "absolute path outside discover set must return 'unknown session'")
+
+    def test_api_trace_dotdot_traversal_returns_error_json(self):
+        """/api/trace?path=../../etc/passwd → 200 with JSON error (traversal blocked)."""
+        data, resp = self._json("/api/trace?path=../../etc/passwd")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data.get("error"), "unknown session",
+                         "path-traversal attempt must return 'unknown session'")
+
+    def test_api_summary_days_negative_clamps_to_one(self):
+        """/api/summary?days=-5 → filter.days clamped to 1."""
+        data, _ = self._json("/api/summary?days=-5")
+        self.assertEqual(data["filter"]["days"], 1)
+
 
 # ---------------------------------------------------------------------------
 # TestReadHistory
@@ -2000,6 +2020,261 @@ class TestDashboardPath(unittest.TestCase):
              patch("pulse.sys.prefix", "/nonexistent/prefix"):
             result = pulse._dashboard_path()
         self.assertEqual(result, Path("/nonexistent/fake") / "dashboard.html")
+
+
+# ---------------------------------------------------------------------------
+# TestBuildTraceAllowlistSecurity — unit-level traversal / empty / positive
+# ---------------------------------------------------------------------------
+
+class TestBuildTraceAllowlistSecurity(unittest.TestCase):
+    """build_trace only allows paths returned by _discover(); everything else is
+    rejected with {"error": "unknown session"} regardless of what the path looks
+    like on disk.  This is the allowlist gate that prevents path traversal."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _no_discover(self):
+        """Patch _discover to return empty list (no known sessions)."""
+        return patch("pulse._discover", return_value=[])
+
+    def test_absolute_system_path_rejected(self):
+        """/etc/passwd is not discovered → error, not read."""
+        with self._no_discover():
+            result = pulse.build_trace("/etc/passwd")
+        self.assertEqual(result.get("error"), "unknown session")
+        self.assertNotIn("steps", result)
+
+    def test_dotdot_traversal_rejected(self):
+        """../../etc/passwd traversal attempt is rejected at the allowlist gate."""
+        with self._no_discover():
+            result = pulse.build_trace("../../etc/passwd")
+        self.assertEqual(result.get("error"), "unknown session")
+        self.assertNotIn("steps", result)
+
+    def test_empty_string_rejected(self):
+        """Empty string is not a discovered path and is rejected."""
+        with self._no_discover():
+            result = pulse.build_trace("")
+        self.assertEqual(result.get("error"), "unknown session")
+        self.assertNotIn("steps", result)
+
+    def test_discovered_path_passes_gate(self):
+        """A path returned by _discover() does NOT get the unknown-session error."""
+        tp = Path(self.tmp.name)
+        prj_dir = tp / "projects" / "proj1"
+        prj_dir.mkdir(parents=True)
+        session = prj_dir / "sess.jsonl"
+        _write_jsonl(session, [_claude_msg("2024-01-01T10:00:00Z",
+                                           "claude-sonnet-4-5", 100, 50)])
+        with patch("pulse._discover", return_value=[(session, "claude")]):
+            result = pulse.build_trace(str(session))
+        self.assertNotIn("error", result,
+                         "discovered path should not be rejected by the gate")
+        self.assertEqual(result.get("kind"), "claude")
+
+
+# ---------------------------------------------------------------------------
+# TestLoopbackBind — cmd_serve binds to 127.0.0.1, never 0.0.0.0
+# ---------------------------------------------------------------------------
+
+class TestLoopbackBind(unittest.TestCase):
+    """cmd_serve must construct ThreadingHTTPServer with host='127.0.0.1'.
+    Binding to 0.0.0.0 or '' would expose usage data beyond the local machine."""
+
+    def test_loopback_only_bind(self):
+        """ThreadingHTTPServer is constructed with ("127.0.0.1", port)."""
+        bound_args = []
+
+        class FakeServer:
+            def __init__(self, server_address, handler_class):
+                bound_args.append(server_address)
+
+            def serve_forever(self):
+                pass  # no-op so cmd_serve returns immediately
+
+        with patch("pulse.ThreadingHTTPServer", FakeServer), \
+             patch("pulse.refresh_index",
+                   return_value=(pulse._empty_index(), False)), \
+             patch("pulse.save_snapshot"), \
+             patch("pulse.threading.Thread"):
+            pulse.cmd_serve(19877, False)
+
+        self.assertEqual(len(bound_args), 1,
+                         "ThreadingHTTPServer must be constructed exactly once")
+        self.assertEqual(bound_args[0][0], "127.0.0.1",
+                         "Server must bind to 127.0.0.1, not 0.0.0.0 or ''")
+        self.assertEqual(bound_args[0][1], 19877,
+                         "Server must use the requested port")
+
+
+# ---------------------------------------------------------------------------
+# TestPerformance — build_summary on a large synthetic index
+#
+# NO wall-clock assertions — timing is printed to test output for human
+# review only.  Flaky timing asserts would break CI on slow machines.
+# The test asserts functional correctness at scale instead.
+# ---------------------------------------------------------------------------
+
+class TestPerformance(unittest.TestCase):
+    """build_summary / _agg on ~88d × 30 projects × 5 models (~13,200 index cells).
+
+    Goals:
+    - Guard against O(n²) / overflow / crash on large inputs
+    - Verify totals equal an independently computed expected value
+    - Print elapsed ms so the "<1 s cold scan" claim can be checked manually
+    """
+
+    N_DAYS = 88          # well within _agg's 90-day window
+    N_PROJECTS = 30
+    MODELS = [
+        "claude-sonnet-4-5", "claude-opus-4-6", "gpt-4o",
+        "gemini-2.5-pro", "claude-haiku",
+    ]
+    ENTRY = {"in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 10, "n": 1, "cost": 0.001}
+
+    @classmethod
+    def _make_large_index(cls):
+        from datetime import datetime as _dt, timedelta as _td
+        idx = pulse._empty_index()
+        today = _dt.now()
+        for day_offset in range(cls.N_DAYS):
+            date_str = (today - _td(days=day_offset)).strftime("%Y-%m-%d")
+            day_bucket = {}
+            for p in range(cls.N_PROJECTS):
+                proj_bucket = {}
+                for mdl in cls.MODELS:
+                    proj_bucket[mdl] = dict(cls.ENTRY)
+                day_bucket[f"proj{p}"] = proj_bucket
+            idx["days"][date_str] = day_bucket
+        # Populate recent ring (500 entries) so build_summary exercises that path
+        from datetime import timezone
+        ts_now = today.astimezone().isoformat(timespec="seconds")
+        idx["recent"] = [
+            [ts_now, f"proj{i % cls.N_PROJECTS}",
+             cls.MODELS[i % len(cls.MODELS)],
+             cls.ENTRY["in"], cls.ENTRY["out"], cls.ENTRY["cr"], cls.ENTRY["cost"]]
+            for i in range(500)
+        ]
+        return idx
+
+    def test_build_summary_correctness_at_scale(self):
+        """build_summary totals match independently computed expected values."""
+        idx = self._make_large_index()
+
+        total_cells = self.N_DAYS * self.N_PROJECTS * len(self.MODELS)
+        expected_n = total_cells * self.ENTRY["n"]
+        expected_out = total_cells * self.ENTRY["out"]
+        expected_cost = total_cells * self.ENTRY["cost"]
+
+        import time as _time
+        t0 = _time.perf_counter()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
+
+        print(f"\n[perf] build_summary({self.N_DAYS}d × {self.N_PROJECTS}p "
+              f"× {len(self.MODELS)}m = {total_cells} cells): "
+              f"{elapsed_ms:.1f} ms  (claim: <1 000 ms)")
+
+        self.assertEqual(s["window"]["n"], expected_n,
+                         "window.n must equal total cell count")
+        self.assertAlmostEqual(s["window"]["out"], expected_out,
+                               delta=1, msg="window.out totals must match")
+        self.assertAlmostEqual(s["window"]["cost"], expected_cost,
+                               places=1, msg="window.cost totals must match")
+        self.assertGreaterEqual(len(s["by_project"]),
+                                min(self.N_PROJECTS, 20),
+                                "by_project should contain up to 20 projects")
+        self.assertEqual(len(s["by_model"]), len(self.MODELS),
+                         "by_model should contain all 5 model keys")
+
+    def test_agg_correctness_and_timing(self):
+        """_agg totals match independently computed expected values."""
+        idx = self._make_large_index()
+
+        total_cells = self.N_DAYS * self.N_PROJECTS * len(self.MODELS)
+        expected_cost = total_cells * self.ENTRY["cost"]
+
+        import time as _time
+        t0 = _time.perf_counter()
+        _, _, _, total = pulse._agg(idx, 90)
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
+
+        print(f"\n[perf] _agg({self.N_DAYS}d × {self.N_PROJECTS}p "
+              f"× {len(self.MODELS)}m = {total_cells} cells): "
+              f"{elapsed_ms:.1f} ms")
+
+        self.assertAlmostEqual(total["cost"], expected_cost,
+                               places=1, msg="_agg cost total must match")
+        self.assertEqual(total["n"], total_cells,
+                         "_agg n must equal total cell count")
+
+
+# ---------------------------------------------------------------------------
+# TestDashboardIntegrity — structural wiring checks for dashboard.html
+#
+# A true headless-browser test (Playwright / Selenium / jsdom) would require
+# a new runtime dependency (npm or pip), violating the zero-dependency pillar.
+# `node --check` (syntax-only parse) + these string-presence assertions are
+# the maximum coverage achievable without adding a dependency.
+# ---------------------------------------------------------------------------
+
+class TestDashboardIntegrity(unittest.TestCase):
+    """Key wiring markers must be present in dashboard.html.
+
+    Catches accidental removal of SSE hooks, budget-alert UI, API paths,
+    and Chart.js canvas ids that the JS depends on.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (pulse.SCRIPT_DIR / "dashboard.html").read_text()
+
+    def test_eventsource_wired_to_events_endpoint(self):
+        """EventSource connects to the /events SSE endpoint."""
+        self.assertIn("EventSource('/events", self.html,
+                      "EventSource must reference /events SSE route")
+
+    def test_render_function_defined(self):
+        """render() is defined — entry point called on each SSE message."""
+        self.assertIn("function render(", self.html,
+                      "render() function must be defined in the dashboard")
+
+    def test_budget_banner_element_present(self):
+        """#budget-banner element is present (C9 budget alert UI)."""
+        self.assertIn('id="budget-banner"', self.html,
+                      "#budget-banner must exist for budget alert display")
+
+    def test_api_summary_referenced(self):
+        """/api/summary is referenced for filter-change fetches or fallback."""
+        self.assertIn("/api/summary", self.html,
+                      "/api/summary must be referenced in the dashboard JS")
+
+    def test_api_trace_referenced(self):
+        """/api/trace is referenced for session drilldown."""
+        self.assertIn("/api/trace", self.html,
+                      "/api/trace must be referenced in the dashboard JS")
+
+    def test_chart_history_canvas_exists(self):
+        """chart-history canvas id is present (long-term trend panel)."""
+        self.assertIn('id="chart-history"', self.html)
+
+    def test_chart_daily_canvas_exists(self):
+        """chart-daily canvas id is present (stacked daily cost chart)."""
+        self.assertIn('id="chart-daily"', self.html)
+
+    def test_chart_model_canvas_exists(self):
+        """chart-model canvas id is present (by-model donut chart)."""
+        self.assertIn('id="chart-model"', self.html)
+
+    def test_chart_rate_canvas_exists(self):
+        """chart-rate canvas id is present (cache hit rate meter)."""
+        self.assertIn('id="chart-rate"', self.html)
 
 
 if __name__ == "__main__":

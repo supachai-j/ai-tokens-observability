@@ -161,7 +161,50 @@ python3 pulse.py report [--days N] # terminal report
 python3 pulse.py digest [--days N] [--format text|json|html]  # WoW weekly digest; HTML for email
 python3 pulse.py save              # snapshot today's usage to history.jsonl
 python3 pulse.py scan [--force]    # (re)build the index
+python3 pulse.py export            # export a per-node snapshot to ~/.config/rtk-pulse/nodes/
 ```
+
+### Multi-machine fleet view
+
+If you run AI coding tools on several machines (e.g. your laptop and a CI
+runner), you can see a combined fleet view on the dashboard.
+
+**How it works:**
+
+1. On each remote machine, schedule `export` to write a snapshot file.
+   Transport (rsync / scp / Syncthing / cloud storage) is your problem —
+   the tool has **no networking code**.
+2. Drop the exported file into `~/.config/rtk-pulse/nodes/` on your
+   dashboard machine.
+3. Open or refresh the dashboard — the **Fleet** panel shows one row per
+   machine (hidden automatically if only one machine is detected).
+
+```bash
+# On each remote machine — run via cron or SessionEnd hook
+python3 pulse.py export             # writes nodes/<hostname>.json
+# OR pin a custom name (useful if hostnames collide):
+RTK_PULSE_NODE=ci-runner-01 python3 pulse.py export
+
+# Recommended cron entry (every 30 min):
+*/30 * * * *  rtk-pulse export >/dev/null 2>&1
+```
+
+Then copy the file to the dashboard machine:
+
+```bash
+# Example: rsync from a remote host into the local nodes/ dir
+rsync ci-runner:/home/user/.config/rtk-pulse/nodes/ci-runner-01.json \
+      ~/.config/rtk-pulse/nodes/
+```
+
+**Privacy:** node snapshots contain day→model aggregates only. Project names
+are intentionally collapsed out so the shared `nodes/` folder doesn't leak
+what you're working on.
+
+**`RTK_PULSE_NODE`** — overrides the node name used for export and fleet
+aggregation (default: `socket.gethostname()`). Set it if your hostname is
+not meaningful (e.g. auto-generated cloud instance names) or if two machines
+share a hostname.
 
 ### Auto-snapshot via Claude Code hook (optional)
 

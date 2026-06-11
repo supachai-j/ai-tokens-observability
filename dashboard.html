@@ -257,6 +257,21 @@
   </div>
 </div>
 
+<div class="panel" style="margin-bottom:12px" id="fleet-panel">
+  <h2>Fleet <span class="tag">multi-machine usage · <span id="fleet-win"></span></span></h2>
+  <table id="t-fleet"><thead>
+    <tr>
+      <th>node</th>
+      <th>updated</th>
+      <th class="num">today cost</th>
+      <th class="num" id="fleet-th-window">last 30d cost</th>
+      <th class="num">out tok</th>
+      <th>top model</th>
+      <th class="num">cache%</th>
+    </tr>
+  </thead><tbody><tr><td class="muted" colspan="7">loading…</td></tr></tbody></table>
+</div>
+
 <div class="panel" style="margin-bottom:12px">
   <h2>Long-term trend · <span class="tag">daily cost · all tools · all projects (global, unfiltered)</span>
     <a href="/api/history.csv" download class="tag" style="float:right;color:var(--accent);text-decoration:none">⬇ CSV</a></h2>
@@ -578,6 +593,82 @@ function loadHistory() {
   }).catch(() => {});
 }
 
+// ---- fleet panel ----
+let lastFleet = null;
+let _fleetTimer = null;
+
+function renderFleet(data) {
+  lastFleet = data;
+  const nodes = data.nodes || [];
+  const winLabel = data.days === 1 ? 'today' : 'last ' + data.days + 'd';
+  const fp = $('fleet-panel');
+  $('fleet-win').textContent = winLabel;
+  $('fleet-th-window').textContent = winLabel + ' cost';
+  // hide panel when only this machine
+  fp.classList.toggle('hidden', nodes.length < 2);
+  if (nodes.length < 2) return;
+
+  const tb = $('t-fleet').querySelector('tbody');
+  const rows = nodes.map(n => {
+    const isLocal = n.local;
+    const nodeName = esc(n.node) + (isLocal
+      ? ' <span class="b" style="color:var(--accent);border-color:var(--accent)">this machine</span>' : '');
+    let updated = '—';
+    if (isLocal) {
+      updated = '<span style="color:var(--green)">live</span>';
+    } else if (n.stale_hours != null) {
+      const h = n.stale_hours;
+      if (h > 24) {
+        updated = '<span style="color:var(--red)">' + Math.round(h) + 'h ago ⚠</span>';
+      } else if (h > 1) {
+        updated = Math.round(h) + 'h ago';
+      } else {
+        updated = Math.round(h * 60) + 'm ago';
+      }
+    }
+    const todayCost = usd(n.today.cost || 0);
+    const winCost = usd(n.window.cost || 0);
+    const outTok = tok(n.window.out || 0);
+    const topM = esc(shortModel(n.top_model || ''));
+    const cachePct = (n.cache_hit_rate * 100).toFixed(1) + '%';
+    return `<tr>
+      <td>${nodeName}</td>
+      <td>${updated}</td>
+      <td class="num">${todayCost}</td>
+      <td class="num">${winCost}</td>
+      <td class="num">${outTok}</td>
+      <td>${topM}</td>
+      <td class="num">${cachePct}</td>
+    </tr>`;
+  });
+
+  // fleet total row
+  const ft = data.fleet || {};
+  const ftToday = ft.today || {};
+  const ftWin = ft.window || {};
+  rows.push(`<tr style="border-top:2px solid var(--border);font-weight:600">
+    <td>fleet total</td>
+    <td></td>
+    <td class="num">${usd(ftToday.cost || 0)}</td>
+    <td class="num">${usd(ftWin.cost || 0)}</td>
+    <td class="num">${tok(ftWin.out || 0)}</td>
+    <td></td>
+    <td></td>
+  </tr>`);
+
+  tb.innerHTML = rows.join('');
+}
+
+function loadFleet() {
+  fetch('/api/fleet?days=' + state.days).then(r => r.json()).then(renderFleet).catch(() => {});
+}
+
+function scheduleFleet() {
+  if (_fleetTimer) clearInterval(_fleetTimer);
+  loadFleet();
+  _fleetTimer = setInterval(loadFleet, 60000);
+}
+
 // theme toggle
 (function() {
   const btn = $('theme-toggle');
@@ -586,6 +677,7 @@ function loadHistory() {
     document.documentElement.dataset.theme = next;
     try { localStorage.setItem('theme', next); } catch (e) {}
     applyChartTheme();
+    if (lastFleet) renderFleet(lastFleet);
   });
   const mq = window.matchMedia('(prefers-color-scheme: light)');
   if (mq.addEventListener) {
@@ -619,6 +711,7 @@ function connect() {
 function applyFilters() {
   fetch('/api/summary?' + qs()).then(r => r.json()).then(render).catch(() => {});
   loadSessions();
+  scheduleFleet();
   connect();
 }
 
@@ -715,6 +808,7 @@ $('f-cur').addEventListener('change', () => {
   try { localStorage.setItem('currency', cur); } catch (e) {}
   if (lastSummary) render(lastSummary);
   if (lastHistory) renderHistory(lastHistory);
+  if (lastFleet) renderFleet(lastFleet);
 });
 $('f-cur').value = cur;
 $('f-live').checked = liveOn;

@@ -3259,5 +3259,336 @@ class TestDigestHtml(unittest.TestCase):
         self.assertNotIn("://", out)
 
 
+# ---------------------------------------------------------------------------
+# C18 — Fleet / multi-machine (node slug, snapshot, merge, HTTP route)
+# ---------------------------------------------------------------------------
+
+class TestNodeSlug(unittest.TestCase):
+    """_node_name and _node_slug."""
+
+    def test_node_name_env_var(self):
+        """RTK_PULSE_NODE overrides hostname."""
+        with patch.dict("os.environ", {"RTK_PULSE_NODE": "my-laptop"}):
+            self.assertEqual(pulse._node_name(), "my-laptop")
+
+    def test_node_name_hostname_fallback(self):
+        """Falls back to socket.gethostname() when env var absent."""
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k != "RTK_PULSE_NODE"}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("pulse.socket.gethostname", return_value="box.local"):
+            self.assertEqual(pulse._node_name(), "box.local")
+
+    def test_node_name_strips_whitespace(self):
+        with patch.dict("os.environ", {"RTK_PULSE_NODE": "  host  "}):
+            self.assertEqual(pulse._node_name(), "host")
+
+    def test_slug_safe_chars(self):
+        self.assertEqual(pulse._node_slug("my-laptop.local"), "my-laptop.local")
+
+    def test_slug_replaces_slashes(self):
+        slug = pulse._node_slug("../../evil")
+        self.assertNotIn("/", slug)
+        self.assertNotIn(".", slug[0:1],
+                         "leading dot must be stripped to avoid hidden/.. files")
+
+    def test_slug_strips_leading_dots(self):
+        self.assertEqual(pulse._node_slug("..foo"), "foo")
+        self.assertEqual(pulse._node_slug(".hidden"), "hidden")
+
+    def test_slug_empty_fallback(self):
+        self.assertEqual(pulse._node_slug(""), "node")
+        self.assertEqual(pulse._node_slug("..."), "node")
+
+    def test_path_traversal_guard(self):
+        """RTK_PULSE_NODE='../../evil' — exported file stays inside NODES_DIR."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            nodes_dir = Path(tmp) / "nodes"
+            with patch.dict("os.environ", {"RTK_PULSE_NODE": "../../evil"}), \
+                 patch("pulse.NODES_DIR", nodes_dir):
+                name = pulse._node_name()
+                slug = pulse._node_slug(name)
+                dest = (nodes_dir / (slug + ".json"))
+                nodes_dir.mkdir(parents=True, exist_ok=True)
+                # resolve relative to nodes_dir — must not escape
+                self.assertEqual(dest.resolve().parent, nodes_dir.resolve())
+
+
+class TestBuildNodeSnapshot(unittest.TestCase):
+    """build_node_snapshot: shape, window cutoff, project collapse."""
+
+    def _make_idx(self):
+        idx = pulse._empty_index()
+        from datetime import datetime, timedelta
+        today = datetime.now().strftime("%Y-%m-%d")
+        old = (datetime.now() - timedelta(days=pulse.KEEP_DAYS + 5)).strftime("%Y-%m-%d")
+        # today: two projects, same model → should be summed
+        idx["days"][today] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 10, "n": 2, "cost": 0.001}},
+            "projB": {"claude-sonnet-4-5": {
+                "in": 200, "out": 80, "cc5": 0, "cc1": 0, "cr": 0, "n": 1, "cost": 0.002}},
+        }
+        # old day (outside window) — should be excluded
+        idx["days"][old] = {
+            "projC": {"claude-opus-4-7": {
+                "in": 999, "out": 999, "cc5": 0, "cc1": 0, "cr": 0, "n": 5, "cost": 9.0}},
+        }
+        return idx, today, old
+
+    def test_shape(self):
+        idx, today, _ = self._make_idx()
+        snap = pulse.build_node_snapshot(idx)
+        for k in ("schema", "node", "generated_at", "days"):
+            self.assertIn(k, snap)
+        self.assertEqual(snap["schema"], 1)
+        self.assertIsInstance(snap["node"], str)
+        self.assertIsInstance(snap["days"], dict)
+
+    def test_window_cutoff_excludes_old(self):
+        idx, today, old = self._make_idx()
+        snap = pulse.build_node_snapshot(idx, days=pulse.KEEP_DAYS)
+        self.assertIn(today, snap["days"])
+        self.assertNotIn(old, snap["days"])
+
+    def test_project_collapse(self):
+        """Two projects on same day/model are summed; project keys absent."""
+        idx, today, _ = self._make_idx()
+        snap = pulse.build_node_snapshot(idx)
+        day_entry = snap["days"].get(today, {})
+        # no project keys — only model keys
+        for k in day_entry:
+            self.assertFalse(k.startswith("proj"),
+                             f"project name '{k}' must not appear in node snapshot")
+        model_entry = day_entry.get("claude-sonnet-4-5", {})
+        self.assertEqual(model_entry["out"], 50 + 80)
+        self.assertEqual(model_entry["in"], 100 + 200)
+        self.assertEqual(model_entry["n"], 2 + 1)
+
+
+class TestReadNodes(unittest.TestCase):
+    """read_nodes: missing dir, malformed JSON, wrong shape, only *.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.nodes_dir = Path(self.tmp.name) / "nodes"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, name, content):
+        self.nodes_dir.mkdir(parents=True, exist_ok=True)
+        (self.nodes_dir / name).write_text(
+            content if isinstance(content, str) else json.dumps(content))
+
+    def test_missing_dir_returns_empty(self):
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.read_nodes()
+        self.assertEqual(result, [])
+
+    def test_malformed_json_skipped(self):
+        self._write("bad.json", "NOT JSON {{{")
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.read_nodes()
+        self.assertEqual(result, [])
+
+    def test_wrong_shape_skipped(self):
+        # missing 'node' key
+        self._write("no-node.json", {"days": {}})
+        # missing 'days' key
+        self._write("no-days.json", {"node": "x"})
+        # not a dict
+        self._write("list.json", [1, 2, 3])
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.read_nodes()
+        self.assertEqual(result, [])
+
+    def test_only_json_files(self):
+        """Non-.json files in nodes/ are not read."""
+        self._write("node1.json", {"node": "n1", "days": {}})
+        self.nodes_dir.mkdir(parents=True, exist_ok=True)
+        (self.nodes_dir / "ignore.txt").write_text('{"node":"x","days":{}}')
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.read_nodes()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["node"], "n1")
+
+    def test_valid_file_parsed(self):
+        payload = {"schema": 1, "node": "builder-1", "generated_at": "2026-06-10T00:00:00",
+                   "days": {"2026-06-10": {"claude-sonnet-4-5": {
+                       "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0, "n": 1, "cost": 0.001}}}}
+        self._write("builder-1.json", payload)
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.read_nodes()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["node"], "builder-1")
+
+
+class TestBuildFleet(unittest.TestCase):
+    """build_fleet: merge, live-local overlay, dedup, fleet totals."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.nodes_dir = Path(self.tmp.name) / "nodes"
+        self.nodes_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _remote_snap(self, node_name, date, out=50, cost=0.001, generated_at=None):
+        from datetime import datetime
+        ga = generated_at or datetime.now().isoformat(timespec="seconds")
+        return {
+            "schema": 1,
+            "node": node_name,
+            "generated_at": ga,
+            "days": {date: {"claude-sonnet-4-5": {
+                "in": 100, "out": out, "cc5": 0, "cc1": 0, "cr": 0, "n": 1, "cost": cost}}},
+        }
+
+    def _write_remote(self, snap):
+        slug = pulse._node_slug(snap["node"])
+        (self.nodes_dir / (slug + ".json")).write_text(json.dumps(snap))
+
+    def _local_idx(self, date, out=30, cost=0.0005):
+        idx = pulse._empty_index()
+        idx["days"][date] = {
+            "proj": {"claude-sonnet-4-5": {
+                "in": 50, "out": out, "cc5": 0, "cc1": 0, "cr": 0, "n": 1, "cost": cost}}}
+        return idx
+
+    def test_live_local_always_in_result(self):
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        idx = self._local_idx(today)
+        local_name = pulse._node_name()
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.build_fleet(idx, days=30)
+        node_names = [n["node"] for n in result["nodes"]]
+        self.assertIn(local_name, node_names)
+
+    def test_live_local_supersedes_stale_file(self):
+        """A nodes/ file for the same name as local is replaced by live data."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        local_name = pulse._node_name()
+        # stale remote file with old generated_at and different out
+        stale = self._remote_snap(local_name, today, out=999, cost=9.99,
+                                  generated_at="2020-01-01T00:00:00")
+        self._write_remote(stale)
+        idx = self._local_idx(today, out=42, cost=0.001)
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.build_fleet(idx, days=30)
+        local_node = next(n for n in result["nodes"] if n["node"] == local_name)
+        self.assertTrue(local_node["local"])
+        # live data (out=42) not the stale file (out=999)
+        self.assertEqual(local_node["window"]["out"], 42)
+
+    def test_merges_remote_nodes(self):
+        """Remote nodes appear alongside the local node."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        remote = self._remote_snap("remote-box", today, out=100, cost=0.002)
+        self._write_remote(remote)
+        idx = self._local_idx(today)
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.build_fleet(idx, days=30)
+        node_names = [n["node"] for n in result["nodes"]]
+        self.assertIn("remote-box", node_names)
+
+    def test_duplicate_names_newer_generated_at_wins(self):
+        """When two files have the same node name, the newer one is kept."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        old_snap = self._remote_snap("twin", today, out=10, generated_at="2026-01-01T00:00:00")
+        new_snap = self._remote_snap("twin", today, out=99, generated_at="2026-06-10T00:00:00")
+        # write both — same slug so second write overwrites first; simulate via read_nodes
+        with patch("pulse.NODES_DIR", self.nodes_dir), \
+             patch("pulse.read_nodes", return_value=[old_snap, new_snap]), \
+             patch("pulse._node_name", return_value="local-machine"):
+            result = pulse.build_fleet(pulse._empty_index(), days=30)
+        twin_node = next((n for n in result["nodes"] if n["node"] == "twin"), None)
+        self.assertIsNotNone(twin_node)
+        self.assertEqual(twin_node["window"]["out"], 99)
+
+    def test_fleet_totals_equal_sum_of_nodes(self):
+        """fleet.window.cost = sum of all nodes' window.cost."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        remote = self._remote_snap("remote-box", today, cost=0.05)
+        self._write_remote(remote)
+        idx = self._local_idx(today, cost=0.02)
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.build_fleet(idx, days=30)
+        fleet_cost = result["fleet"]["window"]["cost"]
+        node_total = sum(n["window"]["cost"] for n in result["nodes"])
+        self.assertAlmostEqual(fleet_cost, node_total, places=6)
+
+    def test_required_keys_in_response(self):
+        from datetime import datetime
+        idx = pulse._empty_index()
+        with patch("pulse.NODES_DIR", self.nodes_dir):
+            result = pulse.build_fleet(idx)
+        for k in ("generated_at", "days", "local_node", "nodes", "fleet", "fleet_daily"):
+            self.assertIn(k, result, f"key '{k}' missing from build_fleet result")
+
+
+class TestHttpFleet(unittest.TestCase):
+    """HTTP /api/fleet route: 200 + application/json + expected keys; days clamping."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        data_dir = Path(self.tmp.name)
+        nodes_dir = data_dir / "nodes"
+        self._patches = [
+            patch("pulse._discover", return_value=[]),
+            patch("pulse.fx_thb", return_value=(32.0, "test")),
+            patch("pulse.rtk_gain", return_value=None),
+            patch("pulse.DATA_DIR", data_dir),
+            patch("pulse.INDEX_FILE", data_dir / "index.json"),
+            patch("pulse.HISTORY_FILE", data_dir / "history.jsonl"),
+            patch("pulse.NODES_DIR", nodes_dir),
+        ]
+        for p in self._patches:
+            p.start()
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), pulse.Handler)
+        self.port = self.srv.server_address[1]
+        self._thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self._thread.start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        for p in self._patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def _get(self, path):
+        return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}")
+
+    def _json(self, path):
+        with self._get(path) as r:
+            return json.loads(r.read()), r
+
+    def test_api_fleet_returns_json(self):
+        """/api/fleet → 200, application/json, required keys present."""
+        data, resp = self._json("/api/fleet")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("application/json", resp.headers.get("Content-Type", ""))
+        for k in ("nodes", "fleet", "local_node", "fleet_daily"):
+            self.assertIn(k, data, f"key '{k}' missing from /api/fleet")
+
+    def test_api_fleet_days_clamp_large(self):
+        """/api/fleet?days=9999 → days clamped to KEEP_DAYS."""
+        data, _ = self._json(f"/api/fleet?days=9999")
+        self.assertLessEqual(data["days"], pulse.KEEP_DAYS)
+
+    def test_api_fleet_days_invalid(self):
+        """/api/fleet?days=abc → days defaults to 30."""
+        data, _ = self._json("/api/fleet?days=abc")
+        self.assertEqual(data["days"], 30)
+
+
 if __name__ == "__main__":
     unittest.main()

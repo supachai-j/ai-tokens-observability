@@ -24,6 +24,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -43,6 +44,7 @@ HISTORY_FILE = DATA_DIR / "history.jsonl"
 BUDGET_ALERT_FILE = DATA_DIR / "budget_alert.json"
 SPIKE_ALERT_FILE = DATA_DIR / "spike_alert.json"
 PRICING_FILE = DATA_DIR / "pricing.json"
+NODES_DIR = DATA_DIR / "nodes"
 SPIKE_WINDOW_DAYS = 7      # trailing window for baseline mean
 SPIKE_MIN_ACTIVE  = 3      # need ≥3 active days for a reliable baseline
 MIN_FORECAST_DAY  = 3      # don't project until ≥3 days into the month
@@ -1306,6 +1308,231 @@ def history_csv():
     return buf.getvalue()
 
 
+# ---------------------------------------------------------------- fleet / multi-machine
+
+def _node_name():
+    """Canonical node identifier: RTK_PULSE_NODE env var, then hostname, then 'node'."""
+    return (os.environ.get("RTK_PULSE_NODE") or socket.gethostname() or "node").strip()
+
+
+def _node_slug(name):
+    """Filesystem-safe slug from a node name.
+
+    Replaces any character outside [A-Za-z0-9._-] with '-', strips leading
+    dots (avoids hidden files / '..' components), and falls back to 'node'
+    if the result is empty.  Critically, '/' and path separators are always
+    replaced, so the slug can never escape NODES_DIR when joined with it.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]", "-", name).lstrip(".")
+    return slug or "node"
+
+
+def build_node_snapshot(idx, days=KEEP_DAYS):
+    """Build a portable per-node snapshot from the in-memory index.
+
+    Projects are COLLAPSED (summed) into day→model entries so that project
+    names — the sensitive dimension — are never included in an exported file
+    intended for a shared nodes/ directory.
+
+    Returns a dict suitable for JSON serialisation and later merging via
+    build_fleet().
+    """
+    now = datetime.now().astimezone()
+    cutoff = (now - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    days_out = {}
+    for day, day_data in idx["days"].items():
+        if day < cutoff:
+            continue
+        day_models = {}
+        for _prj, models in day_data.items():
+            for mdl, e in models.items():
+                _acc(day_models, mdl, e)
+        if day_models:
+            days_out[day] = day_models
+    return {
+        "schema": 1,
+        "node": _node_name(),
+        "generated_at": now.isoformat(timespec="seconds"),
+        "days": days_out,
+    }
+
+
+def cmd_export(out=None):
+    """Build a node snapshot and write it to NODES_DIR/<slug>.json (default)
+    or the path supplied via --out.  Prints the written path.
+    """
+    idx, _ = refresh_index()
+    snap = build_node_snapshot(idx)
+    if out is None:
+        NODES_DIR.mkdir(parents=True, exist_ok=True)
+        dest = NODES_DIR / (_node_slug(snap["node"]) + ".json")
+    else:
+        dest = Path(out)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps(snap, separators=(",", ":")))
+    tmp.replace(dest)
+    print(str(dest))
+
+
+def read_nodes():
+    """Glob NODES_DIR/*.json and return a list of valid node snapshot dicts.
+
+    Tolerates: missing directory, malformed JSON, non-dict payloads, missing
+    required keys.  Accepts any file with a string 'node' key and a dict
+    'days' key (does NOT require schema==1 for forward-compat).  Never raises.
+    """
+    result = []
+    try:
+        files = list(NODES_DIR.glob("*.json"))
+    except OSError:
+        return result
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if not isinstance(data.get("node"), str) or not data["node"]:
+            continue
+        if not isinstance(data.get("days"), dict):
+            continue
+        result.append(data)
+    return result
+
+
+def build_fleet(idx, days=30):
+    """Merge remote node snapshots with the live-local node into a fleet summary.
+
+    Steps:
+    1. read_nodes() → dedupe by node name (newer generated_at wins).
+    2. Overlay live-local (build_node_snapshot from in-memory idx); always
+       supersedes any same-named file — local data is never stale.
+    3. Compute per-node stats within the clamped day window.
+    4. Sum fleet totals and build a daily cost breakdown across nodes.
+
+    Returns a JSON-serialisable dict.  Does NOT touch build_summary or the
+    SSE loop.
+    """
+    now = datetime.now().astimezone()
+    today_str = now.strftime("%Y-%m-%d")
+    cutoff = (now - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+    # --- 1. dedupe remote files by node name (newer generated_at wins)
+    nodes_by_name = {}
+    for nd in read_nodes():
+        name = nd["node"]
+        existing = nodes_by_name.get(name)
+        if existing is None:
+            nodes_by_name[name] = nd
+        else:
+            if (nd.get("generated_at") or "") > (existing.get("generated_at") or ""):
+                nodes_by_name[name] = nd
+
+    # --- 2. overlay live-local (always wins)
+    local_name = _node_name()
+    local_snap = build_node_snapshot(idx, days)
+    local_snap["local"] = True
+    nodes_by_name[local_name] = local_snap
+
+    # --- 3. per-node stats within window
+    node_stats = []
+    for name, nd in nodes_by_name.items():
+        nd_days = nd.get("days") or {}
+        today_by_model = {}
+        window_by_model = {}
+        last_active = ""
+        for day, models in nd_days.items():
+            if day < cutoff:
+                continue
+            if not isinstance(models, dict):
+                continue
+            for mdl, e in models.items():
+                if not isinstance(e, dict):
+                    continue
+                _acc(window_by_model, mdl, e)
+                if day == today_str:
+                    _acc(today_by_model, mdl, e)
+                if day > last_active and (e.get("out") or e.get("n")):
+                    last_active = day
+
+        today_tot = _sum(today_by_model.values()) if today_by_model else dict(EMPTY)
+        window_tot = _sum(window_by_model.values()) if window_by_model else dict(EMPTY)
+
+        cache_denom = (window_tot["in"] + window_tot["cr"] +
+                       window_tot["cc5"] + window_tot["cc1"])
+        cache_hit_rate = (window_tot["cr"] / cache_denom) if cache_denom else 0.0
+
+        top_model = ""
+        if window_by_model:
+            top_model = max(window_by_model.items(), key=lambda kv: kv[1]["out"])[0]
+
+        stale_hours = None
+        if nd.get("local"):
+            stale_hours = 0.0
+        else:
+            ga = nd.get("generated_at")
+            if ga:
+                try:
+                    ga_dt = datetime.fromisoformat(ga)
+                    if ga_dt.tzinfo is None:
+                        ga_dt = ga_dt.replace(tzinfo=now.tzinfo)
+                    stale_hours = max(0.0, (now - ga_dt).total_seconds() / 3600)
+                except ValueError:
+                    pass
+
+        node_stats.append({
+            "node": name,
+            "local": bool(nd.get("local")),
+            "generated_at": nd.get("generated_at"),
+            "stale_hours": stale_hours,
+            "today": today_tot,
+            "window": window_tot,
+            "top_model": top_model,
+            "cache_hit_rate": cache_hit_rate,
+            "last_active": last_active,
+        })
+
+    # local first, then by window cost descending
+    node_stats.sort(key=lambda n: (-int(n["local"]), -n["window"]["cost"]))
+
+    # --- 4. fleet totals
+    fleet_today = _sum(n["today"] for n in node_stats) if node_stats else dict(EMPTY)
+    fleet_window = _sum(n["window"] for n in node_stats) if node_stats else dict(EMPTY)
+
+    # --- 5. fleet_daily: per-day cost per node (within window)
+    all_days = sorted({
+        d for nd in nodes_by_name.values()
+        for d in (nd.get("days") or {})
+        if d >= cutoff
+    })
+    fleet_daily = []
+    for day in all_days:
+        nodes_cost = {}
+        for name, nd in nodes_by_name.items():
+            nd_days = nd.get("days") or {}
+            if day not in nd_days or not isinstance(nd_days[day], dict):
+                continue
+            day_cost = sum(
+                e.get("cost", 0) for e in nd_days[day].values()
+                if isinstance(e, dict)
+            )
+            if day_cost:
+                nodes_cost[name] = day_cost
+        if nodes_cost:
+            fleet_daily.append({"date": day, "nodes": nodes_cost})
+
+    return {
+        "generated_at": now.isoformat(timespec="seconds"),
+        "days": days,
+        "local_node": local_name,
+        "nodes": node_stats,
+        "fleet": {"today": fleet_today, "window": fleet_window},
+        "fleet_daily": fleet_daily,
+    }
+
+
 # ---------------------------------------------------------------- terminal report
 
 def fmt_tok(n):
@@ -1751,6 +1978,10 @@ class Handler(BaseHTTPRequestHandler):
             body = history_csv().encode()
             self._send(200, "text/csv; charset=utf-8", body,
                        extra={"Content-Disposition": 'attachment; filename="rtk-pulse-history.csv"'})
+        elif route == "/api/fleet":
+            idx, _ = refresh_index()
+            body = json.dumps(build_fleet(idx, days)).encode()
+            self._send(200, "application/json", body)
         elif route == "/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -1820,6 +2051,9 @@ def main():
     sub.add_parser("save", help="append usage snapshot to history.jsonl")
     p = sub.add_parser("scan", help="update the incremental index")
     p.add_argument("--force", action="store_true", help="full rebuild")
+    p = sub.add_parser("export", help="export a per-node snapshot to nodes/<slug>.json")
+    p.add_argument("--out", metavar="PATH", default=None,
+                   help="write to PATH instead of the default nodes/ location")
     args = ap.parse_args()
 
     if args.cmd == "serve":
@@ -1836,6 +2070,8 @@ def main():
         idx, changed = refresh_index(force=getattr(args, "force", False))
         print(f"indexed {len(idx['files'])} files, {len(idx['days'])} days "
               f"({'changed' if changed else 'no change'}, {time.time() - t0:.1f}s)")
+    elif args.cmd == "export":
+        cmd_export(getattr(args, "out", None))
     else:
         ap.print_help()
 

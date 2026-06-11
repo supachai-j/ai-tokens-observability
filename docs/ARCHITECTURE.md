@@ -369,12 +369,102 @@ process on the same machine can reach the server. This is appropriate for a
 developer observability tool and would need to change for any multi-user or
 shared-host deployment.
 
+## §9 — Fleet view (export + merge)
+
+### Design goal
+
+Show a combined token-cost overview across multiple machines (e.g. laptop +
+CI runner) without adding any networking code. Transport is the user's
+responsibility (rsync / scp / Syncthing / cloud storage).
+
+### Node snapshot format
+
+`pulse export` (or `rtk-pulse export`) writes
+`~/.config/rtk-pulse/nodes/<slug>.json`:
+
+```json
+{
+  "schema": 1,
+  "node":   "ci-runner-01",
+  "generated_at": "2026-06-11T08:30:00+07:00",
+  "days": {
+    "2026-06-11": {
+      "claude-sonnet-4-5": {"in": 5000, "out": 2500, "cc5": 0,
+                            "cc1": 0, "cr": 1000, "n": 10, "cost": 0.05}
+    }
+  }
+}
+```
+
+**Key design choice — project dimension intentionally collapsed.**
+Project names are the sensitive dimension; a `nodes/` folder synced across
+machines must not leak what you're working on. Node snapshots contain only
+`day → model → entry` aggregates; all project rows for the same day and
+model are summed into one entry before writing.
+
+`schema` is set to `1`. Readers (`read_nodes`) accept any future `schema`
+value without rejecting the file (forward-compat).
+
+### Slug / path safety
+
+`_node_slug(name)` maps the node name to a filesystem-safe token:
+
+1. `re.sub(r"[^A-Za-z0-9._-]", "-", name)` — replaces `/` and other
+   unsafe chars (prevents any path separator from surviving).
+2. `.lstrip(".")` — strips leading dots to avoid hidden files and `..`
+   components.
+3. Falls back to `"node"` if the result is empty.
+
+Result: `NODES_DIR / (slug + ".json")` can never escape `NODES_DIR` because
+no path separator survives step 1.
+
+### Live-local overlay (`build_fleet`)
+
+The dashboard machine never reads a (possibly stale) node file for itself.
+`build_fleet(idx, days)` always re-derives the local node from the in-memory
+index and marks it `local=True`. The live-local entry unconditionally
+supersedes any same-named file in `nodes/`.
+
+For remote nodes, if two files share the same `node` name, the one with the
+newer `generated_at` wins.
+
+### HTTP route
+
+`/api/fleet?days=N` (same `days` clamp logic as `/api/summary`).
+**Off the SSE path** — `build_fleet` is never called from `build_summary`
+or the `/events` loop. The dashboard polls it independently every 60 seconds.
+
+### Dashboard behaviour
+
+The Fleet panel is **hidden when `nodes.length < 2`** so single-machine
+users see no extra clutter. The table columns are:
+Node | Updated (staleness flag ⚠ for >24 h) | Today cost | Window cost |
+Out tok | Top model | Cache%.
+Local node is badged "this machine". A fleet-total summary row closes the
+table. All node and model names are HTML-escaped via the page-level `esc()`
+helper.
+
+### Pillar compliance
+
+| Pillar | Status |
+|---|---|
+| stdlib only | ✓ — `socket` added (stdlib), no new third-party deps |
+| Loopback-only server | ✓ — `build_fleet` called from `do_GET`, no networking code |
+| No index schema bump | ✓ — node files are separate; index version 3 unchanged |
+| HTML-escape on render | ✓ — `esc()` wraps node names and model names in the fleet table |
+| SSE loop untouched | ✓ — fleet is a separate `/api/fleet` route, not in `build_summary` |
+
+### Non-goals for C18 (explicit)
+
+- Per-project export flag (restore project dimension optionally)
+- Source filter on `/api/fleet` (Claude/Codex/Gemini breakdown per node)
+- Auto-export piggyback on the 30-min snapshot loop (cron is sufficient)
+- Stacked daily chart by node in the fleet panel (deferred to C19 UX revamp)
+
 ## Limitations / future ideas
 
 - Costs assume API list prices; subscription plans (Pro/Max) bill differently.
 - Per-minute feed only covers activity observed while the index is being
   refreshed (2-h ring buffer); it is not a full historical event log.
-- Single-user, single-host by design. A multi-host setup would ship
-  snapshots somewhere central rather than exposing the server.
 - `history.jsonl` stores up to ~2 years of daily snapshots and is visualized
   as a long-term daily-cost trend line in the dashboard.

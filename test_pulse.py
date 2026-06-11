@@ -2216,6 +2216,158 @@ class TestPerformance(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestBuildForecast — _build_forecast() projection correctness
+# ---------------------------------------------------------------------------
+
+class TestBuildForecast(unittest.TestCase):
+    """Direct unit tests for _build_forecast with fixed `now` datetimes."""
+
+    def _dt(self, year, month, day):
+        from datetime import datetime as _dt
+        return _dt(year, month, day, 12, 0, 0)
+
+    def test_too_early_returns_none_projected(self):
+        """Day 1 of month (< MIN_FORECAST_DAY=3) → projected is None."""
+        now = self._dt(2026, 6, 1)
+        out = pulse._build_forecast(10.0, None, now)
+        self.assertIsNone(out["projected"])
+        self.assertEqual(out["day_of_month"], 1)
+        self.assertEqual(out["days_in_month"], 30)
+
+    def test_day2_too_early(self):
+        """Day 2 (still < 3) → projected is None."""
+        now = self._dt(2026, 6, 2)
+        out = pulse._build_forecast(5.0, None, now)
+        self.assertIsNone(out["projected"])
+
+    def test_midmonth_no_limit(self):
+        """Day 10, $30 spent, no limit → projected=$90, no pct, will_exceed=False."""
+        now = self._dt(2026, 6, 10)  # June = 30 days
+        out = pulse._build_forecast(30.0, None, now)
+        self.assertAlmostEqual(out["projected"], 90.0, places=2)
+        self.assertIsNone(out["projected_pct"])
+        self.assertFalse(out["will_exceed"])
+        self.assertIsNone(out["exceed_day"])
+
+    def test_midmonth_with_limit_on_track(self):
+        """Day 10, $30 spent, limit=$200 → projected=$90 ≤ $200 → will_exceed=False."""
+        now = self._dt(2026, 6, 10)
+        out = pulse._build_forecast(30.0, 200.0, now)
+        self.assertAlmostEqual(out["projected"], 90.0, places=2)
+        self.assertAlmostEqual(out["projected_pct"], 45.0, places=1)
+        self.assertFalse(out["will_exceed"])
+        self.assertIsNone(out["exceed_day"])
+
+    def test_midmonth_with_limit_exceeding(self):
+        """Day 10, $100 spent, limit=$150 → projected=$300 > $150 → will_exceed, exceed_day=15."""
+        now = self._dt(2026, 6, 10)  # daily_rate=10, day_cross=150/10=15
+        out = pulse._build_forecast(100.0, 150.0, now)
+        self.assertTrue(out["will_exceed"])
+        self.assertEqual(out["exceed_day"], 15)  # ceil(15)=15, max(10,15)=15
+
+    def test_exceed_day_clamps_to_days_in_month(self):
+        """day_cross > days_in_month → exceed_day clamped to days_in_month."""
+        # Day 10, $1 spent, limit=$150 → daily_rate=0.1, day_cross=1500 → clamp to 30
+        now = self._dt(2026, 6, 10)
+        out = pulse._build_forecast(1.0, 150.0, now)
+        # projected=3.0 which is NOT > 150 → will_exceed=False; test clamping separately
+        # Use a case that does exceed: day=28, $281 spent, limit=$300, June 30 days
+        # daily_rate=10.035..., day_cross=300/10.035≈29.9, ceil=30 ≤ 30 → clamp fine
+        now2 = self._dt(2026, 6, 28)
+        out2 = pulse._build_forecast(281.0, 300.0, now2)
+        self.assertTrue(out2["will_exceed"])
+        self.assertLessEqual(out2["exceed_day"], 30)
+
+    def test_already_exceeded_exceed_day_uses_max(self):
+        """month_cost already > limit → will_exceed, exceed_day = max(day, ceil(day_cross))."""
+        # Day 10, $200 spent, limit=$150 → daily_rate=20, day_cross=150/20=7.5 → ceil=8
+        # max(10, 8) = 10
+        now = self._dt(2026, 6, 10)
+        out = pulse._build_forecast(200.0, 150.0, now)
+        self.assertTrue(out["will_exceed"])
+        self.assertEqual(out["exceed_day"], 10)  # max(10, ceil(7.5))=max(10,8)=10
+
+    def test_february_non_leap_days_in_month(self):
+        """2026 is not a leap year → February has 28 days."""
+        now = self._dt(2026, 2, 10)
+        out = pulse._build_forecast(20.0, None, now)
+        self.assertEqual(out["days_in_month"], 28)
+        self.assertAlmostEqual(out["projected"], 20.0 / 10 * 28, places=3)
+
+    def test_result_keys_present(self):
+        """All documented keys are present."""
+        now = self._dt(2026, 6, 10)
+        out = pulse._build_forecast(30.0, 100.0, now)
+        for key in ("projected", "projected_pct", "will_exceed", "exceed_day",
+                    "day_of_month", "days_in_month"):
+            self.assertIn(key, out, f"key '{key}' missing from forecast dict")
+
+
+# ---------------------------------------------------------------------------
+# TestBuildSummaryForecast — build_summary() budget.forecast structure
+# ---------------------------------------------------------------------------
+
+class TestBuildSummaryForecast(unittest.TestCase):
+    def _make_idx(self, cost=30.0):
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        idx["days"][today] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                "n": 1, "cost": cost}}}
+        return idx
+
+    def test_forecast_key_present(self):
+        """build_summary output budget dict must contain 'forecast'."""
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             patch.dict("os.environ", {"RTK_PULSE_BUDGET": "100",
+                                        "RTK_PULSE_BUDGET_ALERT": "80,100"}):
+            s = pulse.build_summary(idx)
+        self.assertIn("forecast", s["budget"])
+
+    def test_forecast_has_required_keys(self):
+        """budget.forecast has all documented keys."""
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             patch.dict("os.environ", {"RTK_PULSE_BUDGET": "100",
+                                        "RTK_PULSE_BUDGET_ALERT": "80,100"}):
+            s = pulse.build_summary(idx)
+        fc = s["budget"]["forecast"]
+        for key in ("projected", "projected_pct", "will_exceed", "exceed_day",
+                    "day_of_month", "days_in_month"):
+            self.assertIn(key, fc, f"forecast key '{key}' missing")
+
+    def test_forecast_types(self):
+        """forecast values have correct Python types."""
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             patch.dict("os.environ", {"RTK_PULSE_BUDGET": "100",
+                                        "RTK_PULSE_BUDGET_ALERT": "80,100"}):
+            s = pulse.build_summary(idx)
+        fc = s["budget"]["forecast"]
+        self.assertIsInstance(fc["will_exceed"], bool)
+        self.assertIsInstance(fc["day_of_month"], int)
+        self.assertIsInstance(fc["days_in_month"], int)
+
+    def test_forecast_present_without_budget(self):
+        """budget.forecast present even when no RTK_PULSE_BUDGET is set."""
+        idx = self._make_idx()
+        import os as _os
+        clean = {k: v for k, v in _os.environ.items()
+                 if k not in ("RTK_PULSE_BUDGET", "RTK_PULSE_BUDGET_ALERT")}
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             patch.dict("os.environ", clean, clear=True):
+            s = pulse.build_summary(idx)
+        self.assertIn("forecast", s["budget"])
+
+
+# ---------------------------------------------------------------------------
 # TestSpikeConfig — _spike_config() parsing
 # ---------------------------------------------------------------------------
 
@@ -2594,6 +2746,11 @@ class TestDashboardIntegrity(unittest.TestCase):
         """#spike-banner element is present (C13 cost-spike alert UI)."""
         self.assertIn('id="spike-banner"', self.html,
                       "#spike-banner must exist for cost-spike alert display")
+
+    def test_month_forecast_element_present(self):
+        """#c-month-forecast element is present (C15 budget forecast sub-line)."""
+        self.assertIn('id="c-month-forecast"', self.html,
+                      "#c-month-forecast must exist for budget forecast display")
 
     def test_api_summary_referenced(self):
         """/api/summary is referenced for filter-change fetches or fallback."""

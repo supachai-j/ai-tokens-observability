@@ -125,7 +125,15 @@ domains (`projects`, `models`), FX rate, the rtk savings summary, and a
 ```
 
 `limit` comes from `RTK_PULSE_BUDGET` (USD float); the frontend renders a
-color-coded spend-vs-limit meter when it is set. `crossed` drives two
+color-coded spend-vs-limit meter when it is set. The `forecast` sub-object
+(added by `_build_forecast`) contains a linear month-to-date projection:
+`projected` (daily_rate × days_in_month), `projected_pct` (vs limit),
+`will_exceed` (bool), and `exceed_day` (first day the limit is crossed, clamped
+to days_in_month). Projection is suppressed until `MIN_FORECAST_DAY=3` days into
+the month to avoid noisy early estimates. This is **runtime-only** (no index
+change, v3 unchanged) and **dashboard-only** — no native notification is fired
+(forecasts flip day-to-day; the low-false-positive bar for notifications is
+the budget threshold crossing, not a projection). `crossed` drives two
 notification paths that fire outside the SSE loop (see §6 below):
 1. **Dashboard banner** — shown above the cards grid when `crossed` is set;
    amber for crossed < 100, red for crossed ≥ 100; dismissible per

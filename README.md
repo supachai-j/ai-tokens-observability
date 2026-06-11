@@ -106,6 +106,8 @@ export RTK_PULSE_THB=33.0
 export RTK_PULSE_HOME=~/somewhere/else
 
 # monthly spend limit in USD — enables the budget card + color-coded meter
+# also shows a projected month-end spend on the card; flags the estimated day
+# your limit will be exceeded if you stay at the current daily rate
 export RTK_PULSE_BUDGET=20.0
 
 # budget alert thresholds as % of limit (default: 80,100)

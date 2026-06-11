@@ -15,10 +15,12 @@ Data sources:
 """
 
 import argparse
+import calendar
 import csv
 import html
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -42,6 +44,7 @@ BUDGET_ALERT_FILE = DATA_DIR / "budget_alert.json"
 SPIKE_ALERT_FILE = DATA_DIR / "spike_alert.json"
 SPIKE_WINDOW_DAYS = 7      # trailing window for baseline mean
 SPIKE_MIN_ACTIVE  = 3      # need ≥3 active days for a reliable baseline
+MIN_FORECAST_DAY  = 3      # don't project until ≥3 days into the month
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PORT = 8377
 LIVE_WINDOW_MIN = 10  # a project counts as "live" if active within this many minutes
@@ -555,7 +558,31 @@ def _budget_thresholds():
     return sorted(result) if result else [80.0, 100.0]
 
 
-def _build_budget(month_cost, current_month):
+def _build_forecast(month_cost, limit, now):
+    """Linear month-end projection from month-to-date spend.
+
+    Returns projected end-of-month cost (None until MIN_FORECAST_DAY), and —
+    when a budget limit is set — projected % of budget and the day-of-month
+    the limit is projected to be crossed at the current daily rate.
+    """
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    day = now.day
+    out = {"projected": None, "projected_pct": None, "will_exceed": False,
+           "exceed_day": None, "day_of_month": day, "days_in_month": days_in_month}
+    if day < MIN_FORECAST_DAY:
+        return out  # too early to project reliably
+    daily_rate = month_cost / day  # treats today as a full day → mildly conservative
+    out["projected"] = round(daily_rate * days_in_month, 4)
+    if limit:
+        out["projected_pct"] = round(out["projected"] / limit * 100, 2)
+        if out["projected"] > limit and daily_rate > 0:
+            day_cross = limit / daily_rate
+            out["will_exceed"] = True
+            out["exceed_day"] = min(days_in_month, max(day, math.ceil(day_cross)))
+    return out
+
+
+def _build_budget(month_cost, current_month, now):
     """Build the budget sub-object for build_summary."""
     limit = _budget_limit()
     thresholds = _budget_thresholds()
@@ -576,6 +603,7 @@ def _build_budget(month_cost, current_month):
         "pct": pct,
         "thresholds": thresholds,
         "crossed": crossed,
+        "forecast": _build_forecast(month_cost, limit, now),
     }
 
 
@@ -748,7 +776,7 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
         "sources": all_sources,
         "fx": dict(zip(("thb", "src"), fx_thb())),
         "rtk": rtk_gain(),
-        "budget": _build_budget(month_cost, current_month),
+        "budget": _build_budget(month_cost, current_month, now),
         "spike": _build_spike(idx, now, today_tot["cost"], project, model, source),
     }
 

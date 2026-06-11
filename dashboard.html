@@ -209,7 +209,8 @@
   <div class="card"><div class="label" id="l-month">This month · est. cost</div>
     <div class="value" id="c-month-cost">–</div>
     <div class="sub" id="c-month-budget"></div>
-    <div class="meter"><div id="m-month"></div></div></div>
+    <div class="meter"><div id="m-month"></div></div>
+    <div class="sub" id="c-month-forecast"></div></div>
   <div class="card"><div class="label" id="l-cache">Cache hit rate</div>
     <div class="value" id="c-cache">–</div><div class="meter"><div id="m-cache"></div></div></div>
   <div class="card"><div class="label">rtk tokens saved</div>
@@ -407,6 +408,20 @@ function render(s) {
     } else {
       $('c-month-budget').textContent = 'no budget set';
       $('m-month').style.width = '0%';
+    }
+    // budget forecast sub-line
+    const fc = b.forecast;
+    if (fc && fc.projected != null) {
+      let txt = 'projected ' + usd(fc.projected);
+      if (fc.projected_pct != null) txt += ' \xb7 ' + fc.projected_pct.toFixed(0) + '% of budget';
+      if (fc.will_exceed && fc.exceed_day) {
+        txt += ' \xb7 ⚠ exceeds ~' + esc(b.month) + '-' + String(fc.exceed_day).padStart(2, '0');
+      }
+      $('c-month-forecast').textContent = txt;
+      $('c-month-forecast').style.color = fc.will_exceed ? cssVar('--red') : '';
+    } else {
+      $('c-month-forecast').textContent = '';
+      $('c-month-forecast').style.color = '';
     }
     // budget alert banner
     const banner = $('budget-banner');

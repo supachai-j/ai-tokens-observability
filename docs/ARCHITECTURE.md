@@ -147,9 +147,13 @@ the prior period had zero cost), `cache_hit_rate`, `by_tool` (grouped by
 (top 5 by cost), and the optional `rtk` savings summary.
 
 `cmd_digest(days, fmt)` exposes this via `pulse.py digest [--days N]
-[--format text|json]`; JSON output is machine-readable for cron/email
-pipelines. The `≤90-day` index window bounds the maximum useful `--days`
-value.
+[--format text|json|html]`; JSON output is machine-readable for cron/email
+pipelines; `--format html` emits a self-contained HTML artifact rendered by
+`digest_html(d)` — inline CSS, no JavaScript, no remote resources (no CDN,
+no `://` URLs), all user-derived strings (project names, tool labels)
+HTML-escaped via `html.escape()`. The artifact is safe to email directly or
+open in any browser. The `≤90-day` index window bounds the maximum useful
+`--days` value.
 
 ### 4. Cost model (`PRICING`, `cost_usd`)
 

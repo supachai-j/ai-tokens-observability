@@ -130,7 +130,7 @@ export RTK_PULSE_TRACE_MAX=600
 ```bash
 python3 pulse.py serve --open      # dashboard at http://localhost:8377
 python3 pulse.py report [--days N] # terminal report
-python3 pulse.py digest [--days N] [--format text|json]  # WoW weekly digest; JSON for cron/email
+python3 pulse.py digest [--days N] [--format text|json|html]  # WoW weekly digest; HTML for email
 python3 pulse.py save              # snapshot today's usage to history.jsonl
 python3 pulse.py scan [--force]    # (re)build the index
 ```
@@ -194,7 +194,13 @@ above (snapshot after every session) with a weekly cron for the digest:
 ```cron
 # Weekly digest every Monday at 09:00 (JSON → pipe to mail/Slack/etc.)
 0 9 * * 1  rtk-pulse digest --format json >> ~/rtk-pulse-digest.jsonl
+
+# HTML version — self-contained, inline-CSS, no JS/CDN — safe to email or open in any browser
+0 9 * * 1  rtk-pulse digest --format html > ~/rtk-pulse-digest.html
 ```
+
+The `--format html` artifact is completely self-contained (inline CSS, no JavaScript,
+no remote resources) so it opens correctly in any browser or email client.
 
 ## Security & privacy
 

@@ -2622,5 +2622,168 @@ class TestDashboardIntegrity(unittest.TestCase):
         self.assertIn('id="chart-rate"', self.html)
 
 
+# ---------------------------------------------------------------------------
+# TestDigestHtml — digest_html() rendering correctness + safety
+# ---------------------------------------------------------------------------
+
+class TestDigestHtml(unittest.TestCase):
+    """digest_html() must produce valid, self-contained HTML with no remote
+    resources and no JavaScript, with all user-derived strings HTML-escaped."""
+
+    def _make_digest(self, top_projects=None, delta_cost_pct=125.0):
+        from datetime import datetime as _dt, timedelta as _td
+        now = _dt.now()
+        today = now.strftime("%Y-%m-%d")
+        start = (now - _td(days=6)).strftime("%Y-%m-%d")
+        if top_projects is None:
+            top_projects = [{"project": "workspace-rtk", "cost": 3.5, "out": 200}]
+        return {
+            "generated_at": now.isoformat(timespec="seconds"),
+            "period": {"start": start, "end": today, "days": 7},
+            "totals": {"cost": 9.0, "out": 500, "in_total": 1200, "n": 15},
+            "prev": {"cost": 4.0, "out": 200, "n": 6},
+            "delta_cost_pct": delta_cost_pct,
+            "cache_hit_rate": 0.45,
+            "by_tool": {
+                "claude": {"cost": 6.0, "out": 350, "in": 300,
+                           "cc5": 0, "cc1": 0, "cr": 60, "n": 10},
+                "codex": {"cost": 2.0, "out": 100, "in": 80,
+                          "cc5": 0, "cc1": 0, "cr": 0, "n": 3},
+                "gemini": {"cost": 1.0, "out": 50, "in": 40,
+                           "cc5": 0, "cc1": 0, "cr": 0, "n": 2},
+            },
+            "by_day": [
+                {"date": start, "cost": 4.0, "out": 200, "n": 5},
+                {"date": today, "cost": 5.0, "out": 300, "n": 10},
+            ],
+            "busiest_day": {"date": today, "cost": 5.0},
+            "top_projects": top_projects,
+            "rtk": {"avg_savings_pct": 62.3, "total_saved": 450000},
+        }
+
+    def _html(self, **kw):
+        return pulse.digest_html(self._make_digest(**kw))
+
+    # -- Structure --
+    def test_starts_with_doctype(self):
+        """Output must begin with <!DOCTYPE html."""
+        out = self._html()
+        self.assertTrue(out.strip().startswith("<!DOCTYPE html"),
+                        "digest_html must start with <!DOCTYPE html")
+
+    def test_ends_with_html_close(self):
+        """Output must contain closing </html>."""
+        self.assertIn("</html>", self._html())
+
+    def test_no_script_tag(self):
+        """NO <script anywhere (case-insensitive) — email clients block JS."""
+        out = self._html()
+        self.assertNotIn("<script", out.lower(),
+                         "digest_html must not emit any <script> tag")
+
+    def test_no_remote_urls(self):
+        """NO :// anywhere — catches http/https/protocol-relative remote deps."""
+        out = self._html()
+        self.assertNotIn("://", out,
+                         "digest_html must not contain any remote URL (://)")
+
+    # -- Content --
+    def test_contains_period_dates(self):
+        """Period start and end dates appear in the output."""
+        d = self._make_digest()
+        out = pulse.digest_html(d)
+        self.assertIn(d["period"]["start"], out)
+        self.assertIn(d["period"]["end"], out)
+
+    def test_contains_total_cost(self):
+        """Total cost appears formatted in the output."""
+        out = self._html()
+        self.assertIn("9.00", out)
+
+    def test_contains_claude_code_label(self):
+        """Friendly tool label 'Claude Code' appears in the by-tool section."""
+        out = self._html()
+        self.assertIn("Claude Code", out)
+
+    def test_wow_positive_shows_up_arrow(self):
+        """Positive WoW delta shows up-arrow character reference."""
+        out = self._html(delta_cost_pct=25.0)
+        self.assertIn("&#9650;", out)   # ▲
+
+    def test_wow_negative_shows_down_arrow(self):
+        """Negative WoW delta shows down-arrow character reference."""
+        out = self._html(delta_cost_pct=-15.0)
+        self.assertIn("&#9660;", out)   # ▼
+
+    def test_wow_none_shows_na(self):
+        """None WoW delta shows 'n/a'."""
+        out = self._html(delta_cost_pct=None)
+        self.assertIn("n/a", out)
+
+    def test_rtk_section_present_when_rtk_set(self):
+        """rtk savings section appears when rtk data is present."""
+        out = self._html()
+        self.assertIn("rtk savings", out)
+
+    # -- HTML escaping (critical security property) --
+    def test_project_name_is_escaped(self):
+        """XSS payload in project name must be escaped — raw < must not appear."""
+        evil = '<script>alert(1)</script>&"'
+        out = pulse.digest_html(self._make_digest(
+            top_projects=[{"project": evil, "cost": 1.0, "out": 10}]))
+        # Raw <script> must NOT appear
+        self.assertNotIn("<script>", out,
+                         "Unescaped <script> found in project name output")
+        # Escaped forms must be present
+        self.assertIn("&lt;script&gt;", out,
+                      "&lt;script&gt; escape not found for project name")
+        self.assertIn("&amp;", out,
+                      "&amp; escape not found for project name")
+
+    # -- Empty / missing data --
+    def test_empty_data_no_crash(self):
+        """digest_html with empty by_tool, top_projects, None busiest/delta/rtk → valid HTML."""
+        minimal = {
+            "generated_at": "2026-06-11T00:00:00",
+            "period": {"start": "2026-06-04", "end": "2026-06-11", "days": 7},
+            "totals": {"cost": 0.0, "out": 0, "in_total": 0, "n": 0},
+            "prev": {"cost": 0.0, "out": 0, "n": 0},
+            "delta_cost_pct": None,
+            "cache_hit_rate": 0.0,
+            "by_tool": {},
+            "by_day": [],
+            "busiest_day": None,
+            "top_projects": [],
+            "rtk": None,
+        }
+        out = pulse.digest_html(minimal)
+        self.assertIn("</html>", out)
+        self.assertNotIn("<script", out.lower())
+        self.assertNotIn("://", out)
+
+    # -- cmd_digest html smoke --
+    def test_cmd_digest_html_prints_doctype(self):
+        """cmd_digest(7, 'html') writes a DOCTYPE to stdout."""
+        from datetime import datetime as _dt, timedelta as _td
+        now = _dt.now()
+        today = now.strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        idx["days"][today] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 500, "out": 200, "cc5": 0, "cc1": 0, "cr": 100,
+                "n": 5, "cost": 3.0}}}
+        buf = io.StringIO()
+        with patch("pulse.refresh_index", return_value=(idx, False)), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             contextlib.redirect_stdout(buf):
+            pulse.cmd_digest(7, "html")
+        out = buf.getvalue()
+        self.assertTrue(out.strip().startswith("<!DOCTYPE html"),
+                        "cmd_digest html output must start with <!DOCTYPE html")
+        self.assertNotIn("<script", out.lower())
+        self.assertNotIn("://", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ Data sources:
 
 import argparse
 import csv
+import html
 import io
 import json
 import os
@@ -1328,11 +1329,190 @@ def build_digest(idx, days=7):
     }
 
 
+def digest_html(d):
+    """Render a build_digest() dict as a self-contained HTML string.
+
+    Hard constraints:
+    - No JavaScript (<script>), no remote resources (CDN/http/https).
+    - Inline CSS only; inline style="" for dynamic widths/colors.
+    - All user-derived strings (project names, tool labels) go through html.escape().
+    """
+    esc = html.escape  # shorthand
+
+    p = d.get("period") or {}
+    t = d.get("totals") or {}
+    pv = d.get("prev") or {}
+    days = p.get("days", 7)
+    start = p.get("start", "")
+    end = p.get("end", "")
+
+    # WoW delta
+    delta = d.get("delta_cost_pct")
+    if delta is not None:
+        if delta >= 0:
+            wow_html = (f'<span style="color:#e5484d">&#9650;{delta:.1f}%</span>'
+                        f' vs prior {days}d &asymp;${pv.get("cost", 0):.2f}')
+        else:
+            wow_html = (f'<span style="color:#30a46c">&#9660;{abs(delta):.1f}%</span>'
+                        f' vs prior {days}d &asymp;${pv.get("cost", 0):.2f}')
+    else:
+        wow_html = (f'<span style="color:#888">n/a</span>'
+                    f' vs prior {days}d &asymp;${pv.get("cost", 0):.2f}')
+
+    # Cache bar
+    cache_rate = d.get("cache_hit_rate") or 0.0
+    cache_pct = min(100.0, cache_rate * 100)
+    cache_bar = (
+        f'<div style="display:inline-block;background:#e5e7eb;border-radius:4px;'
+        f'height:8px;width:120px;vertical-align:middle">'
+        f'<div style="background:#3b82f6;height:8px;border-radius:4px;'
+        f'width:{cache_pct:.0f}%"></div></div>')
+
+    # By Tool table rows
+    by_tool = d.get("by_tool") or {}
+    max_tool_cost = max((e["cost"] for e in by_tool.values()), default=1) or 1
+    tool_rows = []
+    for tool, e in by_tool.items():
+        label = esc(_DIGEST_TOOL_NAMES.get(tool, tool))
+        pct = e["cost"] / max_tool_cost * 100
+        bar = (f'<div style="background:#e5e7eb;border-radius:4px;height:8px;width:120px">'
+               f'<div style="background:#3b82f6;height:8px;border-radius:4px;'
+               f'width:{pct:.0f}%"></div></div>')
+        tool_rows.append(
+            f'<tr><td>{label}</td>'
+            f'<td style="text-align:right">${e["cost"]:.2f}</td>'
+            f'<td style="text-align:right">{fmt_tok(e["out"])}</td>'
+            f'<td style="padding-left:8px">{bar}</td></tr>')
+    tool_table = ("\n".join(tool_rows)
+                  if tool_rows else '<tr><td colspan="4" style="color:#888">—</td></tr>')
+
+    # Busiest day
+    bd = d.get("busiest_day")
+    busiest_html = (f'<p><strong>Busiest day:</strong> {esc(bd["date"])} &asymp;${bd["cost"]:.2f}</p>'
+                    if bd else "")
+
+    # Top projects table rows
+    top_projects = d.get("top_projects") or []
+    max_proj_cost = max((proj["cost"] for proj in top_projects), default=1) or 1
+    proj_rows = []
+    for proj in top_projects:
+        name = proj["project"]
+        display = name if len(name) <= 40 else "…" + name[-39:]
+        pct = proj["cost"] / max_proj_cost * 100
+        bar = (f'<div style="background:#e5e7eb;border-radius:4px;height:8px;width:120px">'
+               f'<div style="background:#3b82f6;height:8px;border-radius:4px;'
+               f'width:{pct:.0f}%"></div></div>')
+        proj_rows.append(
+            f'<tr><td>{esc(display)}</td>'
+            f'<td style="text-align:right">${proj["cost"]:.2f}</td>'
+            f'<td style="text-align:right">{fmt_tok(proj["out"])}</td>'
+            f'<td style="padding-left:8px">{bar}</td></tr>')
+    proj_table = ("\n".join(proj_rows)
+                  if proj_rows else '<tr><td colspan="4" style="color:#888">—</td></tr>')
+
+    # Daily cost list
+    by_day = d.get("by_day") or []
+    max_day_cost = max((row["cost"] for row in by_day), default=1) or 1
+    day_rows = []
+    for row in by_day:
+        pct = row["cost"] / max_day_cost * 100
+        bar = (f'<div style="display:inline-block;background:#e5e7eb;border-radius:4px;'
+               f'height:8px;width:100px;vertical-align:middle">'
+               f'<div style="background:#3b82f6;height:8px;border-radius:4px;'
+               f'width:{pct:.0f}%"></div></div>')
+        day_rows.append(
+            f'<li style="margin:4px 0">'
+            f'{esc(row["date"])} &nbsp; ${row["cost"]:.2f} &nbsp; {bar}</li>')
+    day_list = "\n".join(day_rows) if day_rows else '<li style="color:#888">—</li>'
+
+    # rtk savings
+    rtk = d.get("rtk")
+    rtk_html = ""
+    if rtk:
+        avg = rtk.get("avg_savings_pct") or 0
+        saved = rtk.get("total_saved") or 0
+        rtk_html = f'<p><strong>rtk savings:</strong> {avg:.1f}% avg &middot; {fmt_tok(saved)} tokens</p>'
+
+    # Inline CSS (system font, light theme, no external refs)
+    css = """
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   Helvetica, Arial, sans-serif;
+      font-size: 14px; line-height: 1.5; color: #111; background: #fff;
+      max-width: 640px; margin: 32px auto; padding: 0 16px;
+    }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    h2 { font-size: 15px; margin: 24px 0 8px; border-bottom: 1px solid #e5e7eb;
+         padding-bottom: 4px; color: #333; }
+    p { margin: 6px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+    th { text-align: left; font-weight: 600; color: #555; font-size: 12px;
+         padding: 4px 6px; border-bottom: 1px solid #e5e7eb; }
+    td { padding: 5px 6px; border-bottom: 1px solid #f3f4f6; }
+    ul { list-style: none; padding: 0; }
+    .period { color: #555; font-size: 13px; margin-bottom: 16px; }
+    .stat { margin: 4px 0; }
+    footer { margin-top: 32px; font-size: 11px; color: #888; border-top: 1px solid #e5e7eb;
+             padding-top: 8px; }
+    """
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weekly Digest &mdash; {esc(start)} &rarr; {esc(end)}</title>
+<style>{css}</style>
+</head><body>
+<h1>AI Tokens &mdash; Weekly Digest</h1>
+<p class="period">{esc(start)} &rarr; {esc(end)} ({days}d)</p>
+
+<h2>Totals</h2>
+<p class="stat"><strong>Cost:</strong> ${t.get("cost", 0):.2f} &nbsp; {wow_html}</p>
+<p class="stat"><strong>Input:</strong> {fmt_tok(t.get("in_total", 0))} &nbsp;
+  <strong>Output:</strong> {fmt_tok(t.get("out", 0))} &nbsp;
+  <strong>Messages:</strong> {t.get("n", 0)}</p>
+
+<h2>Cache Hit Rate</h2>
+<p>{cache_pct:.1f}% &nbsp; {cache_bar}</p>
+
+{rtk_html}
+
+<h2>By Tool</h2>
+<table>
+  <thead><tr>
+    <th>Tool</th><th style="text-align:right">Cost (USD)</th>
+    <th style="text-align:right">Output tokens</th><th></th>
+  </tr></thead>
+  <tbody>{tool_table}</tbody>
+</table>
+
+{busiest_html}
+
+<h2>Top Projects</h2>
+<table>
+  <thead><tr>
+    <th>Project</th><th style="text-align:right">Cost (USD)</th>
+    <th style="text-align:right">Output tokens</th><th></th>
+  </tr></thead>
+  <tbody>{proj_table}</tbody>
+</table>
+
+<h2>Daily Cost</h2>
+<ul>{day_list}</ul>
+
+<footer>Generated {esc(d.get("generated_at", ""))} &middot; AI Tokens Observability</footer>
+</body></html>"""
+
+
 def cmd_digest(days, fmt):
     idx, _ = refresh_index()
     d = build_digest(idx, days=days)
     if fmt == "json":
         print(json.dumps(d, indent=2, default=str))
+        return
+    if fmt == "html":
+        print(digest_html(d))
         return
     p = d["period"]
     t = d["totals"]
@@ -1530,7 +1710,7 @@ def main():
     p.add_argument("--days", type=int, default=30)
     p = sub.add_parser("digest", help="week-over-week digest (WoW deltas + by-tool)")
     p.add_argument("--days", type=int, default=7)
-    p.add_argument("--format", choices=["text", "json"], default="text", dest="fmt")
+    p.add_argument("--format", choices=["text", "json", "html"], default="text", dest="fmt")
     sub.add_parser("save", help="append usage snapshot to history.jsonl")
     p = sub.add_parser("scan", help="update the incremental index")
     p.add_argument("--force", action="store_true", help="full rebuild")

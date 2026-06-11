@@ -133,17 +133,17 @@
   canvas { max-height: 260px; }
   #feed-wrap { max-height: 280px; overflow-y: auto; }
   footer { color: var(--dim); font-size: 11px; margin-top: 16px; }
-  #budget-banner {
+  .alert-banner {
     display: flex; align-items: center; gap: 10px;
     padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
     border: 1px solid var(--border); font-size: 13px;
   }
-  #budget-banner .bb-msg { flex: 1; }
-  #budget-banner .bb-dismiss {
+  .alert-banner .bb-msg { flex: 1; }
+  .alert-banner .bb-dismiss {
     background: none; border: none; color: inherit; font-size: 16px;
     cursor: pointer; padding: 0 4px; opacity: .7; line-height: 1;
   }
-  #budget-banner .bb-dismiss:hover { opacity: 1; }
+  .alert-banner .bb-dismiss:hover { opacity: 1; }
 </style>
 </head>
 <body>
@@ -190,9 +190,13 @@
     <input type="checkbox" id="f-live" checked><span class="track"></span></label>
 </div>
 
-<div id="budget-banner" hidden>
+<div id="budget-banner" class="alert-banner" hidden>
   <span class="bb-msg" id="bb-msg"></span>
   <button class="bb-dismiss" id="bb-dismiss" type="button" title="Dismiss">×</button>
+</div>
+<div id="spike-banner" class="alert-banner" hidden>
+  <span class="bb-msg" id="sb-msg"></span>
+  <button class="bb-dismiss" id="sb-dismiss" type="button" title="Dismiss">×</button>
 </div>
 
 <div class="cards">
@@ -427,6 +431,32 @@ function render(s) {
       banner.setAttribute('hidden', '');
     }
   }
+  // spike alert banner
+  if (s.spike) {
+    const sp = s.spike;
+    const sbanner = $('spike-banner');
+    if (sp.triggered) {
+      const dismissKey = 'spike:' + esc(sp.date);
+      let dismissed = false;
+      try { dismissed = localStorage.getItem('spikeDismiss') === dismissKey; } catch (e) {}
+      if (!dismissed) {
+        $('sb-msg').textContent =
+          '⚠ Cost spike — today ' + usd(sp.today_cost) + ' is ' +
+          (sp.ratio || 0).toFixed(1) + 'x your ' + sp.window_days +
+          '-day average (' + usd(sp.baseline) + ').';
+        const color = (sp.ratio || 0) >= 5 ? cssVar('--red') : cssVar('--amber');
+        sbanner.style.background = color + '22';
+        sbanner.style.borderColor = color;
+        sbanner.style.color = color;
+        sbanner.removeAttribute('hidden');
+        $('sb-dismiss')._dismissKey = dismissKey;
+      } else {
+        sbanner.setAttribute('hidden', '');
+      }
+    } else {
+      sbanner.setAttribute('hidden', '');
+    }
+  }
   $('c-cache').textContent = (s.cache_hit_rate * 100).toFixed(1) + '%';
   $('m-cache').style.width = (s.cache_hit_rate * 100).toFixed(1) + '%';
   $('m-rtk').style.background = cssVar('--accent');
@@ -630,6 +660,11 @@ $('bb-dismiss').addEventListener('click', () => {
   const key = $('bb-dismiss')._dismissKey;
   if (key) { try { localStorage.setItem('budgetDismiss', key); } catch (e) {} }
   $('budget-banner').setAttribute('hidden', '');
+});
+$('sb-dismiss').addEventListener('click', () => {
+  const key = $('sb-dismiss')._dismissKey;
+  if (key) { try { localStorage.setItem('spikeDismiss', key); } catch (e) {} }
+  $('spike-banner').setAttribute('hidden', '');
 });
 function setLive(on) {
   liveOn = on;

@@ -38,6 +38,9 @@ DATA_DIR = Path(os.environ.get("RTK_PULSE_HOME", Path.home() / ".config" / "rtk-
 INDEX_FILE = DATA_DIR / "index.json"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 BUDGET_ALERT_FILE = DATA_DIR / "budget_alert.json"
+SPIKE_ALERT_FILE = DATA_DIR / "spike_alert.json"
+SPIKE_WINDOW_DAYS = 7      # trailing window for baseline mean
+SPIKE_MIN_ACTIVE  = 3      # need ≥3 active days for a reliable baseline
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PORT = 8377
 LIVE_WINDOW_MIN = 10  # a project counts as "live" if active within this many minutes
@@ -575,6 +578,76 @@ def _build_budget(month_cost, current_month):
     }
 
 
+def _spike_config():
+    """Read RTK_PULSE_SPIKE and RTK_PULSE_SPIKE_MIN env vars.
+
+    Returns (multiple, floor, enabled).
+    multiple > 0 enables the alert; RTK_PULSE_SPIKE=0 (or negative) disables it.
+    floor is the minimum today_cost (USD) required to fire.
+    """
+    raw = os.environ.get("RTK_PULSE_SPIKE", "3")
+    try:
+        mult = float(raw)
+    except (ValueError, TypeError):
+        mult = 3.0
+    enabled = mult > 0
+    try:
+        floor = float(os.environ.get("RTK_PULSE_SPIKE_MIN", "5"))
+    except (ValueError, TypeError):
+        floor = 5.0
+    if floor < 0:
+        floor = 5.0
+    return mult, floor, enabled
+
+
+def _build_spike(idx, now, today_cost, project, model, source):
+    """Compute the spike sub-object for build_summary.
+
+    Baseline = mean daily cost over the SPIKE_WINDOW_DAYS calendar days BEFORE
+    today (today excluded because it is partial), counting only days with cost > 0
+    so idle/weekend $0 days do not deflate the mean and manufacture false positives.
+    """
+    mult, floor, enabled = _spike_config()
+    today_str = now.strftime("%Y-%m-%d")
+    costs = []
+    for i in range(1, SPIKE_WINDOW_DAYS + 1):
+        day = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        day_cost = 0.0
+        for prj, models in idx["days"].get(day, {}).items():
+            if project and prj != project:
+                continue
+            for mdl, e in models.items():
+                if model and mdl != model:
+                    continue
+                if source and model_source(mdl) != source:
+                    continue
+                day_cost += e["cost"]
+        if day_cost > 0:
+            costs.append(day_cost)
+    n_active = len(costs)
+    baseline = sum(costs) / n_active if n_active else 0.0
+    ratio = round(today_cost / baseline, 2) if baseline > 0 else None
+    triggered = bool(
+        enabled
+        and n_active >= SPIKE_MIN_ACTIVE
+        and baseline > 0
+        and today_cost >= floor
+        and today_cost >= mult * baseline
+    )
+    return {
+        "today_cost": round(today_cost, 4),
+        "baseline": round(baseline, 4),
+        "ratio": ratio,
+        "multiple": mult,
+        "floor": floor,
+        "window_days": SPIKE_WINDOW_DAYS,
+        "active_days": n_active,
+        "enabled": enabled,
+        "triggered": triggered,
+        "date": today_str,
+    }
+
+
 def build_summary(idx, project=None, model=None, days=30, source=None):
     now = datetime.now().astimezone()
     today = now.strftime("%Y-%m-%d")
@@ -675,6 +748,7 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
         "fx": dict(zip(("thb", "src"), fx_thb())),
         "rtk": rtk_gain(),
         "budget": _build_budget(month_cost, current_month),
+        "spike": _build_spike(idx, now, today_tot["cost"], project, model, source),
     }
 
 
@@ -973,6 +1047,10 @@ def save_snapshot(summary=None):
         notify_budget(summary)
     except Exception:
         pass
+    try:
+        notify_spike(summary)
+    except Exception:
+        pass
     return line
 
 
@@ -982,6 +1060,26 @@ def _history_date(line):
         return json.loads(line).get("date", "")
     except ValueError:
         return ""
+
+
+def _native_notify(msg):
+    """Fire a native OS notification with the given message string.
+
+    Uses osascript on macOS; notify-send on Linux (when available).
+    All exceptions are silently swallowed — callers must not depend on success.
+    """
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(
+                ["osascript", "-e",
+                 f'display notification "{msg}" with title "AI Tokens Observability"'],
+                timeout=5, capture_output=True)
+        elif shutil.which("notify-send"):
+            subprocess.run(
+                ["notify-send", "AI Tokens Observability", msg],
+                timeout=5, capture_output=True)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def notify_budget(summary):
@@ -1015,18 +1113,36 @@ def notify_budget(summary):
     except OSError:
         pass
     msg = f"Month-to-date {pct:.1f}% of ${limit:.2f} budget ({month})"
+    _native_notify(msg)
+
+
+def notify_spike(summary):
+    """Fire a native OS notification when today's cost is an anomalous spike.
+
+    Fires at most once per calendar day — state persisted in SPIKE_ALERT_FILE.
+    Safe to call from any thread — all exceptions are swallowed.
+    """
+    sp = (summary or {}).get("spike") or {}
+    if not sp.get("triggered"):
+        return
+    date = sp.get("date") or ""
     try:
-        if sys.platform == "darwin":
-            subprocess.run(
-                ["osascript", "-e",
-                 f'display notification "{msg}" with title "AI Tokens Observability"'],
-                timeout=5, capture_output=True)
-        elif shutil.which("notify-send"):
-            subprocess.run(
-                ["notify-send", "AI Tokens Observability", msg],
-                timeout=5, capture_output=True)
-    except (OSError, subprocess.TimeoutExpired):
+        with open(SPIKE_ALERT_FILE) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    if state.get("date") == date and state.get("alerted"):
+        return
+    # Persist state before firing so a notify crash cannot re-fire
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SPIKE_ALERT_FILE, "w") as f:
+            json.dump({"date": date, "alerted": True}, f)
+    except OSError:
         pass
+    msg = (f"Today ${sp.get('today_cost', 0):.2f} is {sp.get('ratio') or 0:.1f}x "
+           f"the {sp.get('window_days', 7)}-day average (${sp.get('baseline', 0):.2f})")
+    _native_notify(msg)
 
 
 def read_history(max_days=None):

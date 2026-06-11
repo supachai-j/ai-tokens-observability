@@ -193,13 +193,23 @@ the 90-day index window — this makes it the only durable long-term record.
 power the long-term daily-cost trend panel in the dashboard.
 
 After writing the history line, `save_snapshot` calls `notify_budget(summary)`
-in a try/except so notification failures can never break snapshotting. This
-wires budget alerts to every snapshot trigger (serve start, 30-min loop, and
-`pulse.py save` / SessionEnd hook) without ever touching the SSE hot path.
+and `notify_spike(summary)` in separate try/excepts so notification failures
+can never break snapshotting. This wires both alert types to every snapshot
+trigger (serve start, 30-min loop, and `pulse.py save` / SessionEnd hook)
+without ever touching the SSE hot path.
+
 `notify_budget` reads `budget.crossed` from the summary; if set and greater
 than the last alerted level for the current month (state in
 `~/.config/rtk-pulse/budget_alert.json`), it fires a native notification and
 updates the state file. A month rollover resets the alerted level.
+
+`notify_spike` reads `spike.triggered` from the summary; if true and today's
+date has not already been alerted (state in `~/.config/rtk-pulse/spike_alert.json`),
+it fires a native notification. Fires at most once per calendar day. Both
+notifiers share the `_native_notify(msg)` helper (osascript on macOS,
+notify-send on Linux). Spike detection is **runtime-only** — nothing new is
+persisted to `index.json`; `_build_spike` aggregates over the existing
+`idx["days"]` structure. The index version stays at 3.
 
 ### 7. FX resolver (`fx_thb`)
 

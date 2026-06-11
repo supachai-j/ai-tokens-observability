@@ -112,6 +112,11 @@ export RTK_PULSE_BUDGET=20.0
 # triggers a dashboard banner + native OS notification (once per threshold per month)
 export RTK_PULSE_BUDGET_ALERT=80,100
 
+# cost-spike alert: warn when today's spend >= N× the trailing 7-day average
+# (only over active days; gated by a $ floor). Default 3x / $5. Set 0 to disable.
+export RTK_PULSE_SPIKE=3
+export RTK_PULSE_SPIKE_MIN=5
+
 # max trace steps shown in the session drilldown (default 600, min 50)
 export RTK_PULSE_TRACE_MAX=600
 ```

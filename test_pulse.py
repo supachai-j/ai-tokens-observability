@@ -2216,6 +2216,346 @@ class TestPerformance(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestSpikeConfig — _spike_config() parsing
+# ---------------------------------------------------------------------------
+
+class TestSpikeConfig(unittest.TestCase):
+    def _cfg(self, env=None):
+        with patch.dict("os.environ", env or {}, clear=(env is not None)):
+            if env is None:
+                # Only clear the spike-specific vars so other env vars survive
+                import os as _os
+                clean = {k: v for k, v in _os.environ.items()
+                         if k not in ("RTK_PULSE_SPIKE", "RTK_PULSE_SPIKE_MIN")}
+                with patch.dict("os.environ", clean, clear=True):
+                    return pulse._spike_config()
+            return pulse._spike_config()
+
+    def test_defaults(self):
+        """Unset env → (3.0, 5.0, True)."""
+        import os as _os
+        clean = {k: v for k, v in _os.environ.items()
+                 if k not in ("RTK_PULSE_SPIKE", "RTK_PULSE_SPIKE_MIN")}
+        with patch.dict("os.environ", clean, clear=True):
+            mult, floor, enabled = pulse._spike_config()
+        self.assertAlmostEqual(mult, 3.0)
+        self.assertAlmostEqual(floor, 5.0)
+        self.assertTrue(enabled)
+
+    def test_custom_multiple(self):
+        """RTK_PULSE_SPIKE='4' → mult=4.0, enabled=True."""
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "4",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            mult, floor, enabled = pulse._spike_config()
+        self.assertAlmostEqual(mult, 4.0)
+        self.assertTrue(enabled)
+
+    def test_zero_disables(self):
+        """RTK_PULSE_SPIKE='0' → enabled=False."""
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "0",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            mult, floor, enabled = pulse._spike_config()
+        self.assertFalse(enabled)
+
+    def test_negative_disables(self):
+        """Negative multiple → enabled=False."""
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "-1",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            mult, floor, enabled = pulse._spike_config()
+        self.assertFalse(enabled)
+
+    def test_invalid_multiple_falls_back_to_3(self):
+        """Invalid RTK_PULSE_SPIKE → mult=3.0, enabled=True."""
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "bad",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            mult, floor, enabled = pulse._spike_config()
+        self.assertAlmostEqual(mult, 3.0)
+        self.assertTrue(enabled)
+
+    def test_custom_floor(self):
+        """RTK_PULSE_SPIKE_MIN='10' → floor=10.0."""
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "10"}):
+            _, floor, _ = pulse._spike_config()
+        self.assertAlmostEqual(floor, 10.0)
+
+    def test_invalid_floor_falls_back_to_5(self):
+        """Invalid RTK_PULSE_SPIKE_MIN → floor=5.0."""
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "bad"}):
+            _, floor, _ = pulse._spike_config()
+        self.assertAlmostEqual(floor, 5.0)
+
+    def test_negative_floor_falls_back_to_5(self):
+        """Negative RTK_PULSE_SPIKE_MIN → floor=5.0."""
+        with patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "-1"}):
+            _, floor, _ = pulse._spike_config()
+        self.assertAlmostEqual(floor, 5.0)
+
+
+# ---------------------------------------------------------------------------
+# TestBuildSpike — _build_spike() detection correctness
+# ---------------------------------------------------------------------------
+
+class TestBuildSpike(unittest.TestCase):
+    """Fabricate an index with relative dates and verify spike detection."""
+
+    def _reldate(self, days_ago):
+        from datetime import datetime as _dt, timedelta as _td
+        return (_dt.now() - _td(days=days_ago)).strftime("%Y-%m-%d")
+
+    def _make_idx(self, prior_costs, today_cost):
+        """Build an index where prior_costs is a list (index 1..N = days before today)
+        and today_cost is today's cost. Zero-cost days are included in prior_costs list."""
+        idx = pulse._empty_index()
+        today = self._reldate(0)
+        if today_cost > 0:
+            idx["days"][today] = {
+                "projA": {"claude-sonnet-4-5": {
+                    "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                    "n": 1, "cost": today_cost}}}
+        for i, cost in enumerate(prior_costs, start=1):
+            if cost > 0:
+                idx["days"][self._reldate(i)] = {
+                    "projA": {"claude-sonnet-4-5": {
+                        "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                        "n": 1, "cost": cost}}}
+        return idx
+
+    def _spike(self, prior_costs, today_cost, env=None):
+        idx = self._make_idx(prior_costs, today_cost)
+        from datetime import datetime as _dt
+        now = _dt.now().astimezone()
+        base_env = {"RTK_PULSE_SPIKE": "3", "RTK_PULSE_SPIKE_MIN": "5"}
+        if env:
+            base_env.update(env)
+        with patch.dict("os.environ", base_env):
+            return pulse._build_spike(idx, now, today_cost, None, None, None)
+
+    def test_triggers_when_conditions_met(self):
+        """today >= mult*baseline and >= floor and >= SPIKE_MIN_ACTIVE active days."""
+        # prior: 5 active days at $2 each → baseline=2.0; today=$10 (5x, >= floor $5)
+        sp = self._spike([2.0, 2.0, 2.0, 2.0, 2.0], 10.0)
+        self.assertTrue(sp["triggered"])
+        self.assertAlmostEqual(sp["baseline"], 2.0, places=4)
+        self.assertAlmostEqual(sp["ratio"], 5.0, places=1)
+
+    def test_not_triggered_below_floor(self):
+        """today_cost < floor → not triggered even if ratio is high."""
+        # today=$4, floor=$5 → not triggered
+        sp = self._spike([1.0, 1.0, 1.0, 1.0, 1.0], 4.0)
+        self.assertFalse(sp["triggered"])
+
+    def test_not_triggered_with_too_few_active_days(self):
+        """Only 2 active prior days → need >= SPIKE_MIN_ACTIVE=3 → not triggered."""
+        sp = self._spike([2.0, 2.0, 0.0, 0.0, 0.0], 10.0)
+        self.assertFalse(sp["triggered"])
+        self.assertEqual(sp["active_days"], 2)
+
+    def test_not_triggered_when_disabled(self):
+        """RTK_PULSE_SPIKE=0 → enabled=False → not triggered."""
+        sp = self._spike([2.0, 2.0, 2.0, 2.0, 2.0], 10.0,
+                         env={"RTK_PULSE_SPIKE": "0"})
+        self.assertFalse(sp["triggered"])
+        self.assertFalse(sp["enabled"])
+
+    def test_baseline_excludes_today(self):
+        """Baseline is computed from SPIKE_WINDOW_DAYS BEFORE today only."""
+        # prior 5 days: $2 each; today: $1 (well below 3x baseline)
+        sp = self._spike([2.0, 2.0, 2.0, 2.0, 2.0], 1.0)
+        # baseline should be 2.0 (not polluted by today's $1)
+        self.assertAlmostEqual(sp["baseline"], 2.0, places=4)
+
+    def test_zero_cost_days_excluded_from_mean(self):
+        """$0 days must NOT count toward the mean — only active (cost > 0) days."""
+        # 3 active days at $4, 4 zero days → mean of active = 4.0
+        # today=$20 (5x baseline of $4, >= $5 floor) → triggered
+        sp = self._spike([4.0, 4.0, 4.0, 0.0, 0.0, 0.0, 0.0], 20.0)
+        self.assertEqual(sp["active_days"], 3)
+        self.assertAlmostEqual(sp["baseline"], 4.0, places=4)
+        self.assertTrue(sp["triggered"])
+
+    def test_ratio_none_when_no_active_days(self):
+        """No prior active days → baseline=0 → ratio=None."""
+        sp = self._spike([], 10.0)
+        self.assertIsNone(sp["ratio"])
+        self.assertFalse(sp["triggered"])
+
+    def test_result_keys_present(self):
+        """All documented keys are present in the result."""
+        sp = self._spike([2.0, 2.0, 2.0], 10.0)
+        for key in ("today_cost", "baseline", "ratio", "multiple", "floor",
+                    "window_days", "active_days", "enabled", "triggered", "date"):
+            self.assertIn(key, sp, f"key '{key}' missing from spike dict")
+
+    def test_not_triggered_below_multiple(self):
+        """today_cost < mult*baseline → not triggered even if >= floor."""
+        # baseline=10.0, today=$25, mult=3 → need $30 to trigger
+        sp = self._spike([10.0, 10.0, 10.0, 10.0, 10.0], 25.0)
+        self.assertFalse(sp["triggered"])
+
+
+# ---------------------------------------------------------------------------
+# TestBuildSummarySpike — build_summary() includes "spike" key
+# ---------------------------------------------------------------------------
+
+class TestBuildSummarySpike(unittest.TestCase):
+    def _make_idx(self, today_cost=10.0):
+        from datetime import datetime as _dt, timedelta as _td
+        now = _dt.now()
+        today = now.strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        # today
+        idx["days"][today] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                "n": 1, "cost": today_cost}}}
+        # 5 prior days at $2 each (active baseline)
+        for i in range(1, 6):
+            day = (now - _td(days=i)).strftime("%Y-%m-%d")
+            idx["days"][day] = {
+                "projA": {"claude-sonnet-4-5": {
+                    "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                    "n": 1, "cost": 2.0}}}
+        return idx
+
+    def test_spike_key_present(self):
+        """build_summary output must contain a 'spike' key."""
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            s = pulse.build_summary(idx)
+        self.assertIn("spike", s)
+
+    def test_spike_has_required_keys(self):
+        """spike sub-object has all documented keys."""
+        idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            s = pulse.build_summary(idx)
+        sp = s["spike"]
+        for key in ("today_cost", "baseline", "ratio", "multiple", "floor",
+                    "window_days", "active_days", "enabled", "triggered", "date"):
+            self.assertIn(key, sp, f"spike key '{key}' missing")
+
+    def test_spike_triggered_when_anomalous(self):
+        """With today=$10 and prior baseline=$2, spike should trigger (5x, >= $5)."""
+        idx = self._make_idx(today_cost=10.0)
+        with patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")), \
+             patch.dict("os.environ", {"RTK_PULSE_SPIKE": "3",
+                                        "RTK_PULSE_SPIKE_MIN": "5"}):
+            s = pulse.build_summary(idx)
+        self.assertTrue(s["spike"]["triggered"])
+
+
+# ---------------------------------------------------------------------------
+# TestNotifySpike — notify_spike() fire-once-per-day logic
+# ---------------------------------------------------------------------------
+
+class TestNotifySpike(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+        self.alert_file = self.data_dir / "spike_alert.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _summary(self, triggered=True, date="2026-06-11",
+                 today_cost=10.0, ratio=5.0, baseline=2.0, window_days=7):
+        return {
+            "spike": {
+                "triggered": triggered,
+                "date": date,
+                "today_cost": today_cost,
+                "ratio": ratio,
+                "baseline": baseline,
+                "window_days": window_days,
+            }
+        }
+
+    def _notify(self, summary):
+        with patch("pulse.DATA_DIR", self.data_dir), \
+             patch("pulse.SPIKE_ALERT_FILE", self.alert_file):
+            pulse.notify_spike(summary)
+
+    def test_not_triggered_is_noop(self):
+        """triggered=False → subprocess never called."""
+        with patch("pulse.subprocess.run") as mock_run:
+            self._notify(self._summary(triggered=False))
+            mock_run.assert_not_called()
+
+    def test_fires_on_first_trigger(self):
+        """First trigger on a date → notification fires."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary())
+            mock_run.assert_called_once()
+
+    def test_does_not_refire_same_day(self):
+        """Same date → fires only once."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary(date="2026-06-11"))
+            self._notify(self._summary(date="2026-06-11"))
+            self.assertEqual(mock_run.call_count, 1)
+
+    def test_refires_on_new_date(self):
+        """New date → alerted resets; fires again."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary(date="2026-06-10"))
+            self._notify(self._summary(date="2026-06-11"))
+            self.assertEqual(mock_run.call_count, 2)
+
+    def test_state_persisted_to_file(self):
+        """After firing, spike_alert.json reflects the date and alerted=True."""
+        with patch("pulse.subprocess.run"), \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary(date="2026-06-11"))
+        state = json.loads(self.alert_file.read_text())
+        self.assertEqual(state["date"], "2026-06-11")
+        self.assertTrue(state["alerted"])
+
+    def test_subprocess_error_swallowed(self):
+        """OSError in subprocess does not propagate."""
+        with patch("pulse.subprocess.run", side_effect=OSError("no osascript")), \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary())  # must not raise
+
+    def test_linux_uses_notify_send(self):
+        """On Linux with notify-send, notify-send is invoked."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "linux"), \
+             patch("pulse.shutil.which", return_value="/usr/bin/notify-send"):
+            self._notify(self._summary())
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            self.assertEqual(cmd[0], "notify-send")
+
+    def test_linux_no_notify_send_skips(self):
+        """On Linux without notify-send, no subprocess is spawned."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "linux"), \
+             patch("pulse.shutil.which", return_value=None):
+            self._notify(self._summary())
+            mock_run.assert_not_called()
+
+    def test_empty_summary_is_noop(self):
+        """None or empty summary does not raise."""
+        with patch("pulse.subprocess.run") as mock_run:
+            pulse.notify_spike(None)
+            pulse.notify_spike({})
+            mock_run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # TestDashboardIntegrity — structural wiring checks for dashboard.html
 #
 # A true headless-browser test (Playwright / Selenium / jsdom) would require
@@ -2227,8 +2567,8 @@ class TestPerformance(unittest.TestCase):
 class TestDashboardIntegrity(unittest.TestCase):
     """Key wiring markers must be present in dashboard.html.
 
-    Catches accidental removal of SSE hooks, budget-alert UI, API paths,
-    and Chart.js canvas ids that the JS depends on.
+    Catches accidental removal of SSE hooks, budget-alert UI, spike-alert UI,
+    API paths, and Chart.js canvas ids that the JS depends on.
     """
 
     @classmethod
@@ -2249,6 +2589,11 @@ class TestDashboardIntegrity(unittest.TestCase):
         """#budget-banner element is present (C9 budget alert UI)."""
         self.assertIn('id="budget-banner"', self.html,
                       "#budget-banner must exist for budget alert display")
+
+    def test_spike_banner_element_present(self):
+        """#spike-banner element is present (C13 cost-spike alert UI)."""
+        self.assertIn('id="spike-banner"', self.html,
+                      "#spike-banner must exist for cost-spike alert display")
 
     def test_api_summary_referenced(self):
         """/api/summary is referenced for filter-change fetches or fallback."""

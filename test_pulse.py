@@ -1748,5 +1748,235 @@ class TestNotifyBudget(unittest.TestCase):
             mock_run.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# TestBuildDigest — build_digest() aggregation correctness
+# ---------------------------------------------------------------------------
+
+class TestBuildDigest(unittest.TestCase):
+    """build_digest with a fabricated 14-day index (relative dates so _agg
+    cutoff doesn't discard them) covering 3 tools and 2 projects."""
+
+    def _reldate(self, days_ago):
+        from datetime import datetime as _dt, timedelta as _td
+        return (_dt.now() - _td(days=days_ago)).strftime("%Y-%m-%d")
+
+    def _make_idx(self):
+        """
+        Current 7d (days 0-6): projA claude cost=6.0, projB gpt-4o cost=2.0,
+                                projC gemini cost=1.0  → total cur=9.0
+        Prior 7d (days 7-13): projA claude cost=4.0
+                                → total prior=4.0
+        delta_cost_pct = (9-4)/4*100 = 125.0%
+
+        Claude entry has cr=60 (cache reads), in=300 → cache_hit_rate = 60/(300+60)
+        """
+        idx = pulse._empty_index()
+
+        # ---- current period: days 0-6 ----
+        # day 0: projA (claude) + projB (gpt-4o)
+        d0 = self._reldate(0)
+        idx["days"][d0] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 200, "out": 100, "cc5": 0, "cc1": 0, "cr": 40, "n": 3, "cost": 4.0}},
+            "projB": {"gpt-4o": {
+                "in": 80, "out": 30, "cc5": 0, "cc1": 0, "cr": 0, "n": 1, "cost": 2.0}},
+        }
+        # day 3: projA (claude) + projC (gemini)
+        d3 = self._reldate(3)
+        idx["days"][d3] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 20, "n": 2, "cost": 2.0}},
+            "projC": {"gemini-2.5-pro": {
+                "in": 50, "out": 20, "cc5": 0, "cc1": 0, "cr": 0, "n": 1, "cost": 1.0}},
+        }
+
+        # ---- prior period: days 7-13 ----
+        d8 = self._reldate(8)
+        idx["days"][d8] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 150, "out": 70, "cc5": 0, "cc1": 0, "cr": 10, "n": 2, "cost": 4.0}},
+        }
+        return idx
+
+    def _digest(self, idx=None, days=7):
+        if idx is None:
+            idx = self._make_idx()
+        with patch("pulse.rtk_gain", return_value=None):
+            return pulse.build_digest(idx, days=days)
+
+    # -- period bounds --
+    def test_period_start_end(self):
+        d = self._digest()
+        from datetime import datetime as _dt, timedelta as _td
+        expected_start = (_dt.now() - _td(days=6)).strftime("%Y-%m-%d")
+        expected_end = _dt.now().strftime("%Y-%m-%d")
+        self.assertEqual(d["period"]["start"], expected_start)
+        self.assertEqual(d["period"]["end"], expected_end)
+        self.assertEqual(d["period"]["days"], 7)
+
+    # -- totals (cur period: 6+2+1=9.0 cost) --
+    def test_totals_cost(self):
+        d = self._digest()
+        self.assertAlmostEqual(d["totals"]["cost"], 9.0, places=4)
+
+    def test_totals_messages(self):
+        d = self._digest()
+        self.assertEqual(d["totals"]["n"], 7)  # 3+1+2+1 = 7
+
+    def test_totals_in_total_includes_cache(self):
+        """in_total = in + cr + cc5 + cc1 across cur period."""
+        d = self._digest()
+        # projA: in=200+100=300, cr=40+20=60; projB: in=80; projC: in=50
+        # in_total = 300+80+50+60 = 490
+        self.assertEqual(d["totals"]["in_total"], 490)
+
+    # -- prev totals (prior 7d: cost=4.0) --
+    def test_prev_cost(self):
+        d = self._digest()
+        self.assertAlmostEqual(d["prev"]["cost"], 4.0, places=4)
+
+    def test_prev_messages(self):
+        d = self._digest()
+        self.assertEqual(d["prev"]["n"], 2)
+
+    # -- delta --
+    def test_delta_cost_pct(self):
+        """(9-4)/4*100 = 125.0% increase."""
+        d = self._digest()
+        self.assertAlmostEqual(d["delta_cost_pct"], 125.0, places=1)
+
+    def test_delta_none_when_prev_zero(self):
+        """No prior data → prev cost == 0 → delta_cost_pct is None."""
+        idx = pulse._empty_index()
+        d0 = self._reldate(0)
+        idx["days"][d0] = {"projA": {"claude-sonnet-4-5": {
+            "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0, "n": 1, "cost": 1.0}}}
+        d = self._digest(idx=idx)
+        self.assertIsNone(d["delta_cost_pct"])
+
+    # -- cache hit rate --
+    def test_cache_hit_rate(self):
+        """cr=60, in_total=490 → rate = 60/490."""
+        d = self._digest()
+        self.assertAlmostEqual(d["cache_hit_rate"], 60 / 490, places=5)
+
+    # -- by_tool --
+    def test_by_tool_has_claude_codex_gemini(self):
+        d = self._digest()
+        self.assertIn("claude", d["by_tool"])
+        self.assertIn("codex", d["by_tool"])
+        self.assertIn("gemini", d["by_tool"])
+
+    def test_by_tool_sorted_by_cost_desc(self):
+        d = self._digest()
+        costs = [e["cost"] for e in d["by_tool"].values()]
+        self.assertEqual(costs, sorted(costs, reverse=True))
+
+    def test_by_tool_claude_cost(self):
+        d = self._digest()
+        self.assertAlmostEqual(d["by_tool"]["claude"]["cost"], 6.0, places=4)
+
+    # -- top_projects --
+    def test_top_projects_ordered_by_cost(self):
+        d = self._digest()
+        costs = [p["cost"] for p in d["top_projects"]]
+        self.assertEqual(costs, sorted(costs, reverse=True))
+
+    def test_top_projects_capped_at_5(self):
+        """Even with more projects, only top 5 are returned."""
+        idx = pulse._empty_index()
+        d0 = self._reldate(0)
+        idx["days"][d0] = {
+            f"proj{i}": {"claude-sonnet-4-5": {
+                "in": 10, "out": 5, "cc5": 0, "cc1": 0, "cr": 0,
+                "n": 1, "cost": float(i)}}
+            for i in range(1, 8)
+        }
+        d = self._digest(idx=idx)
+        self.assertLessEqual(len(d["top_projects"]), 5)
+
+    # -- busiest_day --
+    def test_busiest_day_is_highest_cost_day(self):
+        d = self._digest()
+        # day0 has cost 4.0+2.0=6.0, day3 has 2.0+1.0=3.0 → busiest is day0
+        self.assertIsNotNone(d["busiest_day"])
+        self.assertEqual(d["busiest_day"]["date"], self._reldate(0))
+
+    def test_busiest_day_none_on_empty_index(self):
+        d = self._digest(idx=pulse._empty_index())
+        self.assertIsNone(d["busiest_day"])
+
+    # -- empty index safety --
+    def test_empty_index_no_crash(self):
+        """build_digest on an empty index returns zero totals, no exceptions."""
+        d = self._digest(idx=pulse._empty_index())
+        self.assertEqual(d["totals"]["cost"], 0.0)
+        self.assertEqual(d["totals"]["n"], 0)
+        self.assertIsNone(d["delta_cost_pct"])
+        self.assertEqual(d["by_tool"], {})
+        self.assertEqual(d["top_projects"], [])
+
+
+# ---------------------------------------------------------------------------
+# TestCmdDigest — cmd_digest text + JSON output
+# ---------------------------------------------------------------------------
+
+class TestCmdDigest(unittest.TestCase):
+
+    def _make_idx(self):
+        from datetime import datetime as _dt, timedelta as _td
+        today = _dt.now().strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        idx["days"][today] = {
+            "projA": {
+                "claude-sonnet-4-5": {
+                    "in": 500, "out": 200, "cc5": 0, "cc1": 0, "cr": 100,
+                    "n": 5, "cost": 3.0},
+            },
+            "projB": {
+                "gpt-4o": {
+                    "in": 100, "out": 40, "cc5": 0, "cc1": 0, "cr": 0,
+                    "n": 2, "cost": 1.0},
+            },
+        }
+        return idx
+
+    def _run_digest(self, days=7, fmt="text"):
+        idx = self._make_idx()
+        buf = io.StringIO()
+        with patch("pulse.refresh_index", return_value=(idx, False)), \
+             patch("pulse.rtk_gain", return_value=None), \
+             contextlib.redirect_stdout(buf):
+            pulse.cmd_digest(days, fmt)
+        return buf.getvalue()
+
+    def test_text_contains_header(self):
+        """Text output must start with 'Weekly Digest'."""
+        out = self._run_digest()
+        self.assertIn("Weekly Digest", out)
+
+    def test_text_contains_tool_label(self):
+        """At least one friendly tool name appears in the by-tool block."""
+        out = self._run_digest()
+        # Claude Code or Codex CLI must appear
+        self.assertTrue(
+            any(label in out for label in ("Claude Code", "Codex CLI", "Gemini CLI")),
+            f"No tool label found in output:\n{out}")
+
+    def test_json_round_trips(self):
+        """JSON format produces valid JSON with required top-level keys."""
+        out = self._run_digest(fmt="json")
+        d = json.loads(out)
+        for key in ("period", "totals", "prev", "by_tool", "top_projects"):
+            self.assertIn(key, d, f"key '{key}' missing from JSON digest")
+
+    def test_json_period_has_expected_keys(self):
+        out = self._run_digest(fmt="json")
+        d = json.loads(out)
+        self.assertIn("start", d["period"])
+        self.assertIn("end", d["period"])
+        self.assertIn("days", d["period"])
+
+
 if __name__ == "__main__":
     unittest.main()

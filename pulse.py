@@ -1144,6 +1144,124 @@ def cmd_report(days):
         print("Live now: " + ", ".join(x["project"] for x in s["live_sessions"]))
 
 
+# ---------------------------------------------------------------- weekly digest
+
+_DIGEST_TOOL_NAMES = {
+    "claude": "Claude Code",
+    "codex": "Codex CLI",
+    "gemini": "Gemini CLI",
+    "other": "Other",
+}
+
+
+def build_digest(idx, days=7):
+    """Week-over-week digest: current period vs prior same-length period.
+
+    Uses _agg twice — once for `days` and once for `2*days`.  The prior
+    period total is the difference (both windows share the same right edge
+    so the subtraction is exact for all additive EMPTY fields).
+    """
+    now = datetime.now().astimezone()
+    today = now.strftime("%Y-%m-%d")
+    start = (now - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+    cur_daily, cur_by_model, cur_by_project, cur_total = _agg(idx, days)
+    _, _, _, two_total = _agg(idx, 2 * days)
+    prev_total = {k: two_total[k] - cur_total[k] for k in EMPTY}
+
+    delta_cost_pct = None
+    if prev_total["cost"] > 0:
+        delta_cost_pct = round(
+            (cur_total["cost"] - prev_total["cost"]) / prev_total["cost"] * 100, 1)
+
+    in_total = cur_total["in"] + cur_total["cr"] + cur_total["cc5"] + cur_total["cc1"]
+    cache_denom = in_total
+    cache_hit_rate = (cur_total["cr"] / cache_denom) if cache_denom else 0.0
+
+    by_tool = {}
+    for mdl, e in cur_by_model.items():
+        _acc(by_tool, model_source(mdl), e)
+    by_tool = dict(sorted(by_tool.items(), key=lambda kv: kv[1]["cost"], reverse=True))
+
+    by_day = [{"date": d["date"], "cost": d["cost"], "out": d["out"], "n": d["n"]}
+              for d in cur_daily]
+
+    busiest_day = (max(cur_daily, key=lambda d: d["cost"]) if cur_daily else None)
+    if busiest_day:
+        busiest_day = {"date": busiest_day["date"], "cost": busiest_day["cost"]}
+
+    top_projects = sorted(cur_by_project.items(),
+                          key=lambda kv: kv[1]["cost"], reverse=True)[:5]
+    top_projects = [{"project": p, "cost": e["cost"], "out": e["out"]}
+                    for p, e in top_projects]
+
+    return {
+        "generated_at": now.isoformat(timespec="seconds"),
+        "period": {"start": start, "end": today, "days": days},
+        "totals": {"cost": cur_total["cost"], "out": cur_total["out"],
+                   "in_total": in_total, "n": cur_total["n"]},
+        "prev": {"cost": prev_total["cost"], "out": prev_total["out"],
+                 "n": prev_total["n"]},
+        "delta_cost_pct": delta_cost_pct,
+        "cache_hit_rate": cache_hit_rate,
+        "by_tool": by_tool,
+        "by_day": by_day,
+        "busiest_day": busiest_day,
+        "top_projects": top_projects,
+        "rtk": rtk_gain(),
+    }
+
+
+def cmd_digest(days, fmt):
+    idx, _ = refresh_index()
+    d = build_digest(idx, days=days)
+    if fmt == "json":
+        print(json.dumps(d, indent=2, default=str))
+        return
+    p = d["period"]
+    t = d["totals"]
+    pv = d["prev"]
+    print(f"Weekly Digest — {p['start']} → {p['end']} ({p['days']}d)")
+    print("═" * 64)
+    print(f"Total:      in {fmt_tok(t['in_total']):>8}   out {fmt_tok(t['out']):>8}"
+          f"   ≈ ${t['cost']:.2f}   ({t['n']} msgs)")
+    if d["delta_cost_pct"] is not None:
+        arrow = "▲" if d["delta_cost_pct"] >= 0 else "▼"
+        wow = f"{arrow}{abs(d['delta_cost_pct']):.1f}%"
+    else:
+        wow = "n/a"
+    print(f"vs prior {days:>2}d: ≈${pv['cost']:.2f}   WoW: {wow}")
+    print(f"Cache hits: {bar(d['cache_hit_rate'])} {d['cache_hit_rate'] * 100:.1f}%")
+    if d["rtk"]:
+        r = d["rtk"]
+        pct = r.get("avg_savings_pct") or 0
+        print(f"rtk saved:  {bar(pct / 100)} {pct:.1f}%  "
+              f"({fmt_tok(r.get('total_saved') or 0)} tokens)")
+    if d["by_tool"]:
+        print()
+        print(f"By Tool (last {days}d)")
+        print("─" * 64)
+        max_cost = max((e["cost"] for e in d["by_tool"].values()), default=1) or 1
+        for tool, e in d["by_tool"].items():
+            label = _DIGEST_TOOL_NAMES.get(tool, tool)
+            print(f"  {label:<20} ${e['cost']:>8.2f}  {bar(e['cost'] / max_cost, 16)}"
+                  f"  out {fmt_tok(e['out'])}")
+    if d["busiest_day"]:
+        bd = d["busiest_day"]
+        print()
+        print(f"Busiest day: {bd['date']}  ≈${bd['cost']:.2f}")
+    if d["top_projects"]:
+        print()
+        print(f"Top projects (last {days}d)")
+        print("─" * 64)
+        max_cost = max((proj["cost"] for proj in d["top_projects"]), default=1) or 1
+        for proj in d["top_projects"]:
+            name = proj["project"]
+            if len(name) > 36:
+                name = "…" + name[-35:]
+            print(f"  {name:<38} ${proj['cost']:>7.2f}  {bar(proj['cost'] / max_cost, 12)}")
+
+
 # ---------------------------------------------------------------- web server
 
 def _fs_state():
@@ -1275,6 +1393,9 @@ def main():
     p.add_argument("--open", action="store_true", help="open browser")
     p = sub.add_parser("report", help="terminal usage report")
     p.add_argument("--days", type=int, default=30)
+    p = sub.add_parser("digest", help="week-over-week digest (WoW deltas + by-tool)")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--format", choices=["text", "json"], default="text", dest="fmt")
     sub.add_parser("save", help="append usage snapshot to history.jsonl")
     p = sub.add_parser("scan", help="update the incremental index")
     p.add_argument("--force", action="store_true", help="full rebuild")
@@ -1284,6 +1405,8 @@ def main():
         cmd_serve(args.port, args.open)
     elif args.cmd == "report":
         cmd_report(args.days)
+    elif args.cmd == "digest":
+        cmd_digest(args.days, args.fmt)
     elif args.cmd == "save":
         line = save_snapshot()
         print(json.dumps(line, indent=2))

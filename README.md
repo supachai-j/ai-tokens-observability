@@ -109,6 +109,7 @@ export RTK_PULSE_TRACE_MAX=600
 ```bash
 python3 pulse.py serve --open      # dashboard at http://localhost:8377
 python3 pulse.py report [--days N] # terminal report
+python3 pulse.py digest [--days N] [--format text|json]  # WoW weekly digest; JSON for cron/email
 python3 pulse.py save              # snapshot today's usage to history.jsonl
 python3 pulse.py scan [--force]    # (re)build the index
 ```

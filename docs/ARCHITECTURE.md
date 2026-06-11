@@ -134,6 +134,23 @@ notification paths that fire outside the SSE loop (see §6 below):
    per month via `osascript` (macOS) or `notify-send` (Linux); state
    persisted in `budget_alert.json`.
 
+### 3b. Weekly digest (`build_digest`, `cmd_digest`)
+
+A pure aggregation over the existing index — no new data source, no new
+HTTP route, no index schema change. `build_digest(idx, days=7)` calls
+`_agg` twice (once for `days`, once for `2*days`); both share the same
+right edge (today), so the prior-period total is the field-wise difference
+of the two results. Returns: period bounds, current totals (`cost`, `out`,
+`in_total`, `n`), prior-period totals, `delta_cost_pct` (or `None` when
+the prior period had zero cost), `cache_hit_rate`, `by_tool` (grouped by
+`model_source`, sorted by cost), `by_day`, `busiest_day`, `top_projects`
+(top 5 by cost), and the optional `rtk` savings summary.
+
+`cmd_digest(days, fmt)` exposes this via `pulse.py digest [--days N]
+[--format text|json]`; JSON output is machine-readable for cron/email
+pipelines. The `≤90-day` index window bounds the maximum useful `--days`
+value.
+
 ### 4. Cost model (`PRICING`, `cost_usd`)
 
 API list prices per MTok, matched top-down by substring against the model

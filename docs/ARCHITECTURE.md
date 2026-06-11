@@ -163,7 +163,7 @@ HTML-escaped via `html.escape()`. The artifact is safe to email directly or
 open in any browser. The `≤90-day` index window bounds the maximum useful
 `--days` value.
 
-### 4. Cost model (`PRICING`, `cost_usd`)
+### 4. Cost model (`PRICING`, `rates_for`, `cost_usd`, `_pricing_overrides`)
 
 API list prices per MTok, matched top-down by substring against the model
 id (`fable` → $10/$50, `opus-4-8/7/6` → $5/$25, older `opus` → $15/$75,
@@ -173,6 +173,43 @@ transcript's `cache_creation` breakdown when present. Costs are **estimates
 of equivalent API spend**, not subscription billing. Cost is computed once
 at scan time and stored in the aggregates; currency conversion happens in
 the frontend so switching USD/THB is instant.
+
+**`rates_for` lookup order (highest precedence first):**
+
+1. **User overrides** (`_pricing_overrides()`) — longest matching key wins.
+2. **`gpt-5` special-case block** — handles nano/mini/pro sub-variants.
+3. **Built-in `PRICING` table** — matched top-down by substring.
+4. **Source fallback** — `codex`/`gemini` → $1.25/$10; all others → $3/$15.
+
+**`_pricing_overrides()` — mtime-cached user pricing file**
+
+Users can override or extend the built-in cost table without code changes by
+creating `~/.config/rtk-pulse/pricing.json` (or `$RTK_PULSE_HOME/pricing.json`):
+
+```json
+{ "model-substring": [input_per_MTok, output_per_MTok], ... }
+```
+
+The loader (`_pricing_overrides`) is **mtime-cached** with a `PRICING_TTL=5`-second
+gate on `stat()` calls, so a 13 000-cell scan re-stats at most once every 5
+seconds rather than per cell. The cache is a module-level dict (`_pricing_mem`).
+On cache miss the file is parsed; any error (absent file, malformed JSON,
+invalid entry) silently yields `{}` so built-in rates are used — the function
+never raises. Entry validation rules:
+
+- Value must be a 2-element list/tuple of non-negative finite numbers.
+- `bool` is explicitly rejected (Python's `bool` subclasses `int`; JSON `true`/`false`
+  must not silently become rates).
+- Keys are lower-cased before storage so matching is case-insensitive.
+- When multiple override keys match a model id, the **longest key wins**
+  (most-specific-first ordering, consistent with the built-in table's top-down
+  substring match).
+
+**Key caveat — costs baked at scan time:** `cost_usd` is called by the scanner
+and the result is stored in `index.json`. Changing `pricing.json` takes effect
+immediately for **new sessions** (next scan picks them up). For **existing index
+data**, run `pulse.py scan --force` to recompute all stored costs from raw
+transcripts. No index schema change; `INDEX_VERSION` v3 is unchanged.
 
 ### 5. HTTP + SSE server (`Handler`, `ThreadingHTTPServer`)
 

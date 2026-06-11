@@ -42,6 +42,7 @@ INDEX_FILE = DATA_DIR / "index.json"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 BUDGET_ALERT_FILE = DATA_DIR / "budget_alert.json"
 SPIKE_ALERT_FILE = DATA_DIR / "spike_alert.json"
+PRICING_FILE = DATA_DIR / "pricing.json"
 SPIKE_WINDOW_DAYS = 7      # trailing window for baseline mean
 SPIKE_MIN_ACTIVE  = 3      # need ≥3 active days for a reliable baseline
 MIN_FORECAST_DAY  = 3      # don't project until ≥3 days into the month
@@ -100,8 +101,55 @@ def model_source(model):
     return "other"
 
 
+PRICING_TTL = 5  # seconds between stat() checks (cost_usd is HOT during scans)
+_pricing_mem = {"checked": 0.0, "mtime": None, "data": {}}
+
+
+def _pricing_overrides():
+    """User pricing overrides from PRICING_FILE → {substring(lower): (in_rate, out_rate)}.
+
+    Cached by mtime; stat() gated to once per PRICING_TTL so a 13k-cell scan
+    re-stats at most once per 5 seconds rather than per cell.
+    Any error (missing file / malformed JSON / invalid entries) → {} so built-ins
+    are used — this function never raises.
+    """
+    now = time.time()
+    if now - _pricing_mem["checked"] < PRICING_TTL:
+        return _pricing_mem["data"]
+    _pricing_mem["checked"] = now
+    try:
+        st = PRICING_FILE.stat()
+    except OSError:
+        # File absent or inaccessible — clear stale data if mtime was set
+        if _pricing_mem["mtime"] is not None:
+            _pricing_mem.update(mtime=None, data={})
+        return _pricing_mem["data"]
+    if st.st_mtime == _pricing_mem["mtime"]:
+        return _pricing_mem["data"]
+    data = {}
+    try:
+        raw = json.loads(PRICING_FILE.read_text())
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                # v must be a 2-element list/tuple of non-negative numbers (not bool)
+                if (isinstance(v, (list, tuple)) and len(v) == 2
+                        and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                                for x in v)
+                        and v[0] >= 0 and v[1] >= 0):
+                    data[str(k).lower()] = (float(v[0]), float(v[1]))
+    except (OSError, ValueError):
+        data = {}
+    _pricing_mem.update(mtime=st.st_mtime, data=data)
+    return data
+
+
 def rates_for(model):
     m = model.lower()
+    # User overrides take precedence over all built-ins; longest key wins
+    ov = _pricing_overrides()
+    for sub in sorted(ov, key=len, reverse=True):
+        if sub in m:
+            return ov[sub]
     if "gpt-5" in m:  # gpt-5 family incl. dated/point releases and -codex variants
         if "nano" in m:
             return 0.05, 0.4

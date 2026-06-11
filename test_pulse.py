@@ -271,6 +271,143 @@ class TestCostUSD(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 1b. TestPricingOverrides — _pricing_overrides() + rates_for() precedence
+# ---------------------------------------------------------------------------
+
+class TestPricingOverrides(unittest.TestCase):
+    """Test custom pricing override via pricing.json.
+
+    IMPORTANT: _pricing_overrides() caches globally in _pricing_mem.
+    Every setUp/tearDown resets the cache AND patches PRICING_FILE to a
+    temp path so overrides don't bleed between tests or into TestRatesFor.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._fake_pricing_file = Path(self.tmp.name) / "pricing.json"
+        self._patch = patch("pulse.PRICING_FILE", self._fake_pricing_file)
+        self._patch.start()
+        # Reset the module-level cache so previous tests' state never bleeds
+        pulse._pricing_mem.update(checked=0.0, mtime=None, data={})
+
+    def tearDown(self):
+        self._patch.stop()
+        self.tmp.cleanup()
+        # Reset cache so subsequent test classes see built-in rates
+        pulse._pricing_mem.update(checked=0.0, mtime=None, data={})
+
+    def _write(self, obj):
+        self._fake_pricing_file.write_text(json.dumps(obj))
+
+    # --- core behaviour ---
+
+    def test_no_file_returns_empty(self):
+        """No pricing.json → _pricing_overrides() == {} (built-ins used)."""
+        result = pulse._pricing_overrides()
+        self.assertEqual(result, {})
+
+    def test_no_file_rates_for_uses_builtin(self):
+        """No pricing.json → rates_for unchanged (regression: no file = no change)."""
+        i, o = pulse.rates_for("claude-opus-4-8")
+        self.assertEqual(i, 5.0)
+        self.assertEqual(o, 25.0)
+
+    def test_valid_override_beats_builtin(self):
+        """Override for opus-4-8 wins over the built-in 5.0/25.0."""
+        self._write({"opus-4-8": [4.0, 20.0]})
+        i, o = pulse.rates_for("claude-opus-4-8")
+        self.assertEqual(i, 4.0)
+        self.assertEqual(o, 20.0)
+
+    def test_new_model_matched(self):
+        """A model not in PRICING is matched via override substring."""
+        self._write({"my-model": [2.0, 8.0]})
+        i, o = pulse.rates_for("my-model-v1")
+        self.assertEqual(i, 2.0)
+        self.assertEqual(o, 8.0)
+
+    def test_override_beats_gpt5_special_case(self):
+        """Override key matching gpt-5 wins before the gpt-5 special-case block."""
+        self._write({"gpt-5": [9.9, 9.9]})
+        i, o = pulse.rates_for("gpt-5-codex")
+        self.assertEqual(i, 9.9)
+        self.assertEqual(o, 9.9)
+
+    def test_longest_key_wins(self):
+        """When multiple override keys match, the longest one is used."""
+        self._write({"gpt": [1.0, 1.0], "gpt-4o": [2.0, 2.0]})
+        i, o = pulse.rates_for("gpt-4o-mini")
+        self.assertEqual(i, 2.0)
+        self.assertEqual(o, 2.0)
+
+    def test_cost_usd_reflects_override(self):
+        """cost_usd uses the override rate (flows through rates_for)."""
+        self._write({"sonnet": [10.0, 10.0]})
+        c = pulse.cost_usd("claude-sonnet-4-5", 1_000_000, 0, 0, 0, 0)
+        self.assertAlmostEqual(c, 10.0, places=6)
+
+    # --- error/malformed handling ---
+
+    def test_malformed_json_returns_empty(self):
+        """Malformed JSON → _pricing_overrides() == {} (no crash)."""
+        self._fake_pricing_file.write_text("{bad json")
+        result = pulse._pricing_overrides()
+        self.assertEqual(result, {})
+
+    def test_invalid_entries_skipped(self):
+        """Only well-formed entries survive; malformed ones are silently dropped."""
+        self._write({
+            "a": [1],           # wrong length
+            "b": ["x", "y"],   # non-numeric
+            "c": [-1, 2],      # negative
+            "d": [1, 2, 3],    # too long
+            "e": True,         # bool, not list
+            "good": [1.0, 2.0],
+        })
+        result = pulse._pricing_overrides()
+        self.assertEqual(set(result.keys()), {"good"})
+        self.assertEqual(result["good"], (1.0, 2.0))
+
+    def test_bool_values_rejected(self):
+        """JSON true/false are bool (subclass of int) and must NOT be accepted as rates."""
+        self._write({"bad": [True, False]})
+        result = pulse._pricing_overrides()
+        self.assertNotIn("bad", result)
+
+    # --- normalisation ---
+
+    def test_keys_lowercased(self):
+        """Keys in pricing.json are lower-cased so matching is case-insensitive."""
+        self._write({"OPUS-4-8": [4.0, 20.0]})
+        i, o = pulse.rates_for("claude-opus-4-8")
+        self.assertEqual(i, 4.0)
+        self.assertEqual(o, 20.0)
+
+    # --- cache behaviour ---
+
+    def test_mtime_change_reloads(self):
+        """Writing a new file (different mtime) causes the cache to reload."""
+        self._write({"sonnet": [1.0, 1.0]})
+        pulse._pricing_mem.update(checked=0.0, mtime=None, data={})  # force re-stat
+        r1 = pulse._pricing_overrides()
+        self.assertIn("sonnet", r1)
+        self.assertEqual(r1["sonnet"], (1.0, 1.0))
+
+        # Overwrite file with new content and force a re-stat by resetting checked
+        import os as _os
+        self._write({"haiku": [0.5, 2.5]})
+        # Bump mtime by at least 1s to guarantee a distinct mtime
+        old_mtime = self._fake_pricing_file.stat().st_mtime
+        _os.utime(self._fake_pricing_file, (old_mtime + 2, old_mtime + 2))
+        pulse._pricing_mem["checked"] = 0.0  # expire TTL gate
+
+        r2 = pulse._pricing_overrides()
+        self.assertNotIn("sonnet", r2)
+        self.assertIn("haiku", r2)
+        self.assertEqual(r2["haiku"], (0.5, 2.5))
+
+
+# ---------------------------------------------------------------------------
 # 2. Claude multi-block dedup
 # ---------------------------------------------------------------------------
 

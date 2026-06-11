@@ -123,6 +123,31 @@ export RTK_PULSE_SPIKE_MIN=5
 export RTK_PULSE_TRACE_MAX=600
 ```
 
+**Custom pricing overrides (`pricing.json`)**
+
+Drop a `pricing.json` file in `~/.config/rtk-pulse/` (or `$RTK_PULSE_HOME`) to
+override or extend the built-in cost table — useful for negotiated enterprise
+rates or new models that aren't listed yet.
+
+Format: a JSON object whose keys are **model-name substrings** and values are
+`[input_per_MTok, output_per_MTok]` in USD:
+
+```json
+{
+  "opus-4-8": [3.5, 17.5],
+  "my-new-model": [1.0, 4.0]
+}
+```
+
+Matching rules:
+- Keys are compared **case-insensitively** as substrings of the model name.
+- When multiple keys match, the **longest key wins** (most-specific first).
+- Overrides beat all built-in rates and the gpt-5 special-case block.
+
+> **Important:** Costs are computed at **scan time** and stored in the index.
+> New sessions pick up the override automatically. To recompute costs for
+> existing history, run `pulse.py scan --force` after editing `pricing.json`.
+
 **Uninstall**
 - clone: delete the clone directory and `~/.config/rtk-pulse/`
 - pipx: `pipx uninstall ai-tokens-observability` then delete `~/.config/rtk-pulse/`

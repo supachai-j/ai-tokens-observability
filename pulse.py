@@ -1410,7 +1410,8 @@ def build_fleet(idx, days=30):
     2. Overlay live-local (build_node_snapshot from in-memory idx); always
        supersedes any same-named file — local data is never stale.
     3. Compute per-node stats within the clamped day window.
-    4. Sum fleet totals and build a daily cost breakdown across nodes.
+    4. Sum fleet totals; build fleet_daily: sorted list of
+       {date, nodes:{name: cost}} for the stacked daily chart.
 
     Returns a JSON-serialisable dict.  Does NOT touch build_summary or the
     SSE loop.
@@ -1497,9 +1498,31 @@ def build_fleet(idx, days=30):
     # local first, then by window cost descending
     node_stats.sort(key=lambda n: (-int(n["local"]), -n["window"]["cost"]))
 
-    # --- 4. fleet totals
+    # --- 4. fleet totals + daily cost breakdown per node
     fleet_today = _sum(n["today"] for n in node_stats) if node_stats else dict(EMPTY)
     fleet_window = _sum(n["window"] for n in node_stats) if node_stats else dict(EMPTY)
+
+    # fleet_daily: [{date, nodes:{name: cost}}, …] sorted by date — feeds the stacked chart
+    daily_by_date: dict = {}
+    for name, nd in nodes_by_name.items():
+        nd_days = nd.get("days") or {}
+        for day, models in nd_days.items():
+            if day < cutoff:
+                continue
+            if not isinstance(models, dict):
+                continue
+            day_cost = sum(
+                e.get("cost", 0) for e in models.values() if isinstance(e, dict)
+            )
+            if day not in daily_by_date:
+                daily_by_date[day] = {}
+            daily_by_date[day][name] = round(
+                daily_by_date[day].get(name, 0) + day_cost, 8
+            )
+    fleet_daily = [
+        {"date": d, "nodes": daily_by_date[d]}
+        for d in sorted(daily_by_date)
+    ]
 
     return {
         "generated_at": now.isoformat(timespec="seconds"),
@@ -1507,6 +1530,7 @@ def build_fleet(idx, days=30):
         "local_node": local_name,
         "nodes": node_stats,
         "fleet": {"today": fleet_today, "window": fleet_window},
+        "fleet_daily": fleet_daily,
     }
 
 

@@ -17,6 +17,12 @@
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
 <style>
+  /* ── spacing & type scale (theme-independent) ── */
+  :root {
+    --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+    --fs-xs: 10px; --fs-sm: 11px; --fs-base: 13px; --fs-md: 14px; --fs-hero: 26px;
+  }
+  /* ── colour tokens ── */
   :root, [data-theme="dark"] {
     --bg: #0d1117; --panel: #161b22; --border: #21262d;
     --text: #e6edf3; --dim: #8b949e; --accent: #2f81f7;
@@ -32,14 +38,15 @@
   * { box-sizing: border-box; margin: 0; }
   body {
     background: var(--bg); color: var(--text);
-    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font: var(--fs-md)/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     padding: 20px; max-width: 1240px; margin: 0 auto;
     transition: background-color .25s ease, color .25s ease;
   }
+  /* ── header ── */
   header { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
   h1 { font-size: 20px; letter-spacing: .5px; }
   h1 .pulse { color: var(--accent); }
-  #status { color: var(--dim); font-size: 12px; }
+  #status { color: var(--dim); font-size: var(--fs-sm); }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
          background: var(--red); margin-right: 5px; vertical-align: 1px; }
   .dot.live { background: var(--green); animation: blink 2s infinite; }
@@ -51,22 +58,26 @@
     transition: background-color .15s, color .15s, border-color .15s;
   }
   .theme-toggle:hover { background: var(--soft-2); color: var(--text); }
+  .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .theme-toggle svg { width: 16px; height: 16px; display: block; }
   .theme-toggle .icon-moon { display: none; }
   [data-theme="light"] .theme-toggle .icon-sun { display: none; }
   [data-theme="light"] .theme-toggle .icon-moon { display: block; }
-  .filters { display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
-             margin-bottom: 16px; }
-  .filters label { color: var(--dim); font-size: 11px; text-transform: uppercase;
+  /* ── filters strip ── */
+  .filters { display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap;
+             margin-bottom: var(--s4); }
+  .filters label { color: var(--dim); font-size: var(--fs-xs); text-transform: uppercase;
                    letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
   .filters select {
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 5px 8px; font: 12px ui-monospace, Menlo, monospace;
     max-width: 240px; cursor: pointer;
   }
+  .filters select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .filters .clear { color: var(--accent); font-size: 12px; cursor: pointer;
                     background: none; border: none; padding: 0; font-family: inherit;
                     text-transform: none; letter-spacing: 0; display: none; }
+  .filters .clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .filters .clear.show { display: inline; }
   .switch { margin-left: auto; }
   .switch input { display: none; }
@@ -82,43 +93,73 @@
   .switch input:checked + .track { background: var(--green); }
   .switch input:checked + .track::after { left: 17px; background: #fff; }
   .hidden { display: none !important; }
+  /* ── cards ── */
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-           gap: 12px; margin-bottom: 18px; }
+           gap: var(--s3); margin-bottom: var(--s5); }
   .card { background: var(--panel); border: 1px solid var(--border);
-          border-radius: 8px; padding: 12px 14px;
-          transition: background-color .25s ease, border-color .25s ease; }
-  .card .label { color: var(--dim); font-size: 11px; text-transform: uppercase;
-                 letter-spacing: 1px; margin-bottom: 4px; }
-  .card .value { font-size: 22px; font-weight: 600; }
-  .card .sub { color: var(--dim); font-size: 11px; margin-top: 2px; }
-  .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 12px; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+          border-radius: 10px; padding: var(--s3) var(--s4);
+          transition: background-color .25s ease, border-color .25s ease, box-shadow .15s; }
+  .card:hover { background: var(--soft-1); box-shadow: 0 2px 8px rgba(0,0,0,.14); }
+  .card .label { color: var(--dim); font-size: var(--fs-sm); text-transform: uppercase;
+                 letter-spacing: 1px; margin-bottom: var(--s1); }
+  .card .value {
+    font-size: var(--fs-hero); font-weight: 600; letter-spacing: -.5px;
+    font-variant-numeric: tabular-nums; font-feature-settings: "tnum";
+  }
+  .card .sub { color: var(--dim); font-size: var(--fs-sm); margin-top: var(--s1); }
+  /* budget card semantic alert — left-border accent when threshold crossed */
+  .card-alert-amber { border-left: 3px solid var(--amber); }
+  .card-alert-red   { border-left: 3px solid var(--red); }
+  /* ── grids ── */
+  .grid  { display: grid; grid-template-columns: 2fr 1fr; gap: var(--s3); margin-bottom: var(--s3); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr;  gap: var(--s3); margin-bottom: var(--s3); }
   @media (max-width: 900px) { .grid, .grid2 { grid-template-columns: 1fr; } }
+  /* ── panels ── */
   .panel { background: var(--panel); border: 1px solid var(--border);
-           border-radius: 8px; padding: 14px;
+           border-radius: 10px; padding: var(--s4);
            transition: background-color .25s ease, border-color .25s ease; }
-  .panel h2 { font-size: 12px; color: var(--dim); text-transform: uppercase;
-              letter-spacing: 1px; margin-bottom: 10px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; color: var(--dim); font-weight: normal; font-size: 11px;
+  .panel h2 {
+    font-size: var(--fs-sm); color: var(--dim); text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: var(--s3);
+    padding-left: var(--s2); border-left: 2px solid var(--accent);
+  }
+  .section-gap  { margin-bottom: var(--s3); }
+  .mt-section   { margin-top: var(--s4); }
+  /* CSV download link floated right of h2 */
+  .csv-link { float: right; color: var(--accent); text-decoration: none;
+              font-size: var(--fs-sm); text-transform: none; letter-spacing: 0; }
+  .csv-link:hover { text-decoration: underline; }
+  /* ── tables ── */
+  .table-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: var(--fs-base); }
+  th { text-align: left; color: var(--dim); font-weight: normal; font-size: var(--fs-sm);
        text-transform: uppercase; padding: 4px 8px 6px 0; border-bottom: 1px solid var(--border); }
   td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
-  td.num, th.num { text-align: right; }
-  .meter { background: var(--soft-2); border-radius: 4px; height: 8px; overflow: hidden; margin-top: 6px; }
-  .meter > div { height: 100%; background: var(--green); transition: width .6s; }
-  .tag { color: var(--dim); font-size: 11px; text-transform: none; letter-spacing: 0; }
+  td.num, th.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums; font-feature-settings: "tnum";
+  }
+  /* ── meters ── */
+  .meter { background: var(--soft-2); border-radius: 6px; height: 6px; overflow: hidden; margin-top: var(--s2); }
+  .meter > div { height: 100%; background: var(--green); border-radius: 6px;
+                 transition: width .6s, background-color .3s; }
+  .tag { color: var(--dim); font-size: var(--fs-sm); text-transform: none; letter-spacing: 0; }
   #live-list li { list-style: none; padding: 6px 0; border-bottom: 1px solid var(--border); }
   #live-list .prj { color: var(--text); }
+  /* ── trace panel ── */
   .trace-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
   .trace-bar select { background: var(--panel); color: var(--text); border: 1px solid var(--border);
                       border-radius: 6px; padding: 5px 8px; font: 12px ui-monospace, Menlo, monospace;
                       max-width: 460px; }
+  .trace-bar select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .trace-bar button { background: var(--soft-1); color: var(--text); border: 1px solid var(--border);
                       border-radius: 6px; padding: 5px 12px; font: 12px ui-monospace, Menlo, monospace;
                       cursor: pointer; }
   .trace-bar button:hover { background: var(--soft-2); }
+  .trace-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #trace-wrap { max-height: 440px; overflow-y: auto; }
-  .b { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px;
+  /* ── badge labels ── */
+  .b { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: var(--fs-xs);
        text-transform: uppercase; letter-spacing: .5px; border: 1px solid var(--border);
        color: var(--dim); white-space: nowrap; }
   .b-prompt { color: var(--accent); border-color: var(--accent); }
@@ -131,12 +172,22 @@
   #t-trace .name { color: var(--text); }
   .muted { color: var(--dim); }
   canvas { max-height: 260px; }
+  /* ── scrollable containers ── */
   #feed-wrap { max-height: 280px; overflow-y: auto; }
-  footer { color: var(--dim); font-size: 11px; margin-top: 16px; }
+  #feed-wrap, #trace-wrap {
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  #feed-wrap::-webkit-scrollbar, #trace-wrap::-webkit-scrollbar { width: 6px; }
+  #feed-wrap::-webkit-scrollbar-track, #trace-wrap::-webkit-scrollbar-track { background: transparent; }
+  #feed-wrap::-webkit-scrollbar-thumb, #trace-wrap::-webkit-scrollbar-thumb {
+    background: var(--border); border-radius: 3px;
+  }
+  footer { color: var(--dim); font-size: var(--fs-sm); margin-top: var(--s4); }
+  /* ── alert banners ── */
   .alert-banner {
     display: flex; align-items: center; gap: 10px;
-    padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
-    border: 1px solid var(--border); font-size: 13px;
+    padding: 10px var(--s4); border-radius: 8px; margin-bottom: var(--s3);
+    border: 1px solid var(--border); font-size: var(--fs-base);
   }
   .alert-banner .bb-msg { flex: 1; }
   .alert-banner .bb-dismiss {
@@ -144,6 +195,9 @@
     cursor: pointer; padding: 0 4px; opacity: .7; line-height: 1;
   }
   .alert-banner .bb-dismiss:hover { opacity: 1; }
+  /* ── fleet table total row ── */
+  .fleet-total-row { font-weight: 600; }
+  .fleet-total-row td { border-top: 2px solid var(--border); border-bottom: none; }
 </style>
 </head>
 <body>
@@ -206,7 +260,7 @@
     <div class="value" id="c-today-cost">–</div><div class="sub" id="c-today-msgs"></div></div>
   <div class="card"><div class="label" id="l-window">Last 30d · est. cost</div>
     <div class="value" id="c-30d-cost">–</div><div class="sub" id="c-7d-cost"></div></div>
-  <div class="card"><div class="label" id="l-month">This month · est. cost</div>
+  <div class="card" id="budget-card"><div class="label" id="l-month">This month · est. cost</div>
     <div class="value" id="c-month-cost">–</div>
     <div class="sub" id="c-month-budget"></div>
     <div class="meter"><div id="m-month"></div></div>
@@ -239,46 +293,51 @@
 <div class="grid2">
   <div class="panel">
     <h2>Projects · <span class="win">last 30d</span></h2>
-    <table id="t-projects"><thead>
-      <tr><th>project</th><th class="num">msgs</th><th class="num">output</th><th class="num">cost</th></tr>
-    </thead><tbody></tbody></table>
+    <div class="table-scroll">
+      <table id="t-projects"><thead>
+        <tr><th>project</th><th class="num">msgs</th><th class="num">output</th><th class="num">cost</th></tr>
+      </thead><tbody></tbody></table>
+    </div>
   </div>
   <div class="panel">
     <h2>Live sessions <span class="tag">(active &lt; 10 min)</span></h2>
     <ul id="live-list"><li class="muted">none</li></ul>
-    <h2 style="margin-top:16px">Models · <span class="win">last 30d</span></h2>
+    <h2 class="mt-section">Models · <span class="win">last 30d</span></h2>
     <table id="t-models"><thead>
       <tr><th>model</th><th class="num">out tok</th><th class="num">cost</th></tr>
     </thead><tbody></tbody></table>
-    <h2 style="margin-top:16px">By tool · <span class="win">last 30d</span></h2>
+    <h2 class="mt-section">By tool · <span class="win">last 30d</span></h2>
     <table id="t-tools"><thead>
       <tr><th>tool</th><th class="num">out tok</th><th class="num">cost</th></tr>
     </thead><tbody></tbody></table>
   </div>
 </div>
 
-<div class="panel" style="margin-bottom:12px" id="fleet-panel">
+<div class="panel section-gap" id="fleet-panel">
   <h2>Fleet <span class="tag">multi-machine usage · <span id="fleet-win"></span></span></h2>
-  <table id="t-fleet"><thead>
-    <tr>
-      <th>node</th>
-      <th>updated</th>
-      <th class="num">today cost</th>
-      <th class="num" id="fleet-th-window">last 30d cost</th>
-      <th class="num">out tok</th>
-      <th>top model</th>
-      <th class="num">cache%</th>
-    </tr>
-  </thead><tbody><tr><td class="muted" colspan="7">loading…</td></tr></tbody></table>
+  <div class="table-scroll">
+    <table id="t-fleet"><thead>
+      <tr>
+        <th>node</th>
+        <th>updated</th>
+        <th class="num">today cost</th>
+        <th class="num" id="fleet-th-window">last 30d cost</th>
+        <th class="num">out tok</th>
+        <th>top model</th>
+        <th class="num">cache%</th>
+      </tr>
+    </thead><tbody><tr><td class="muted" colspan="7">loading…</td></tr></tbody></table>
+  </div>
+  <canvas id="chart-fleet" class="section-gap"></canvas>
 </div>
 
-<div class="panel" style="margin-bottom:12px">
+<div class="panel section-gap">
   <h2>Long-term trend · <span class="tag">daily cost · all tools · all projects (global, unfiltered)</span>
-    <a href="/api/history.csv" download class="tag" style="float:right;color:var(--accent);text-decoration:none">⬇ CSV</a></h2>
+    <a href="/api/history.csv" download class="csv-link">⬇ CSV</a></h2>
   <canvas id="chart-history"></canvas>
 </div>
 
-<div class="panel" style="margin-bottom:12px">
+<div class="panel section-gap">
   <h2>Tracing <span class="tag">prompts · tool calls · MCP · token usage per call</span></h2>
   <div class="trace-bar">
     <select id="tr-session"><option value="">loading sessions…</option></select>
@@ -316,13 +375,15 @@ const palette = () => [cssVar('--accent'), cssVar('--purple'), cssVar('--green')
                        cssVar('--amber'), cssVar('--red'), '#39c5cf', '#db61a2', cssVar('--dim')];
 
 Chart.defaults.font.family = 'ui-monospace, Menlo, monospace';
+Chart.defaults.plugins.tooltip.bodyFont  = { family: 'ui-monospace, Menlo, monospace', size: 11 };
+Chart.defaults.plugins.tooltip.titleFont = { family: 'ui-monospace, Menlo, monospace', size: 11 };
 
 const dailyChart = new Chart($('chart-daily'), {
   type: 'bar',
   data: { labels: [], datasets: [] },
   options: {
     responsive: true, animation: false,
-    plugins: { legend: { position: 'bottom', labels: { boxWidth: 10 } } },
+    plugins: { legend: { position: 'bottom', labels: { boxWidth: 8, padding: 12 } } },
     scales: { x: { stacked: true, grid: { display: false } },
               y: { stacked: true, ticks: { callback: v => sym() + v } } }
   }
@@ -331,11 +392,11 @@ const modelChart = new Chart($('chart-model'), {
   type: 'doughnut',
   data: { labels: [], datasets: [{ data: [], borderWidth: 0 }] },
   options: { responsive: true, animation: false, cutout: '62%',
-             plugins: { legend: { position: 'bottom', labels: { boxWidth: 10 } } } }
+             plugins: { legend: { position: 'bottom', labels: { boxWidth: 8, padding: 12 } } } }
 });
 const rateChart = new Chart($('chart-rate'), {
   type: 'bar',
-  data: { labels: [], datasets: [{ label: 'out tok/min', data: [], borderWidth: 0 }] },
+  data: { labels: [], datasets: [{ label: 'out tok/min', data: [], borderWidth: 0, borderRadius: 4 }] },
   options: {
     responsive: true, animation: false,
     plugins: { legend: { display: false } },
@@ -347,7 +408,7 @@ const historyChart = new Chart($('chart-history'), {
   type: 'line',
   data: { labels: [], datasets: [{
     label: 'daily cost',
-    data: [], borderWidth: 1.5, pointRadius: 2,
+    data: [], borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3,
     fill: false, tension: 0.3,
   }]},
   options: {
@@ -359,12 +420,22 @@ const historyChart = new Chart($('chart-history'), {
     }
   }
 });
+const fleetChart = new Chart($('chart-fleet'), {
+  type: 'bar',
+  data: { labels: [], datasets: [] },
+  options: {
+    responsive: true, animation: false,
+    plugins: { legend: { position: 'bottom', labels: { boxWidth: 8, padding: 12 } } },
+    scales: { x: { stacked: true, grid: { display: false } },
+              y: { stacked: true, ticks: { callback: v => sym() + v } } }
+  }
+});
 
 function applyChartTheme() {
   const dim = cssVar('--dim'), border = cssVar('--border');
   Chart.defaults.color = dim;
   Chart.defaults.borderColor = border;
-  for (const c of [dailyChart, modelChart, rateChart, historyChart]) {
+  for (const c of [dailyChart, modelChart, rateChart, historyChart, fleetChart]) {
     c.options.scales?.x && (c.options.scales.x.ticks.color = dim);
     c.options.scales?.y && (c.options.scales.y.ticks.color = dim,
                             c.options.scales.y.grid.color = border);
@@ -374,6 +445,7 @@ function applyChartTheme() {
   if (lastSummary) render(lastSummary); else
     [dailyChart, modelChart, rateChart].forEach(c => c.update());
   if (lastHistory) renderHistory(lastHistory); else historyChart.update();
+  if (lastFleet) renderFleet(lastFleet); else fleetChart.update();
 }
 
 let lastSummary = null;
@@ -461,6 +533,14 @@ function render(s) {
       banner.setAttribute('hidden', '');
     }
   }
+  // semantic accent on budget card (amber/red left-border when crossed)
+  const bc = $('budget-card');
+  if (s.budget && s.budget.crossed != null) {
+    bc.classList.toggle('card-alert-red',   s.budget.crossed >= 100);
+    bc.classList.toggle('card-alert-amber', s.budget.crossed < 100);
+  } else {
+    bc.classList.remove('card-alert-red', 'card-alert-amber');
+  }
   // spike alert banner
   if (s.spike) {
     const sp = s.spike;
@@ -528,7 +608,8 @@ function render(s) {
   dailyChart.data.datasets = models.map((mdl, i) => ({
     label: shortModel(mdl),
     data: s.daily.map(d => +((d.models[mdl]?.cost || 0) * rate()).toFixed(2)),
-    backgroundColor: COLORS[i % COLORS.length]
+    backgroundColor: COLORS[i % COLORS.length],
+    borderRadius: 4
   }));
   dailyChart.update();
 
@@ -646,7 +727,7 @@ function renderFleet(data) {
   const ft = data.fleet || {};
   const ftToday = ft.today || {};
   const ftWin = ft.window || {};
-  rows.push(`<tr style="border-top:2px solid var(--border);font-weight:600">
+  rows.push(`<tr class="fleet-total-row">
     <td>fleet total</td>
     <td></td>
     <td class="num">${usd(ftToday.cost || 0)}</td>
@@ -657,6 +738,26 @@ function renderFleet(data) {
   </tr>`);
 
   tb.innerHTML = rows.join('');
+
+  // stacked fleet chart — one dataset per node, one bar per day
+  const fd = data.fleet_daily || [];
+  if (fd.length) {
+    const nodeNames = [...new Set(fd.flatMap(d => Object.keys(d.nodes || {})))];
+    const COLORS = palette();
+    fleetChart.data.labels = fd.map(d => d.date.slice(5));
+    fleetChart.data.datasets = nodeNames.map((n, i) => ({
+      label: n,
+      data: fd.map(d => +((d.nodes[n] || 0) * rate()).toFixed(2)),
+      backgroundColor: COLORS[i % COLORS.length],
+      borderRadius: 4
+    }));
+    fleetChart.options.scales.y.ticks.callback = v => sym() + v;
+    fleetChart.update();
+  } else {
+    fleetChart.data.labels = [];
+    fleetChart.data.datasets = [];
+    fleetChart.update();
+  }
 }
 
 function loadFleet() {

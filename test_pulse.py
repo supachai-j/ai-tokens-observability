@@ -3530,10 +3530,10 @@ class TestBuildFleet(unittest.TestCase):
         idx = pulse._empty_index()
         with patch("pulse.NODES_DIR", self.nodes_dir):
             result = pulse.build_fleet(idx)
-        for k in ("generated_at", "days", "local_node", "nodes", "fleet"):
+        for k in ("generated_at", "days", "local_node", "nodes", "fleet", "fleet_daily"):
             self.assertIn(k, result, f"key '{k}' missing from build_fleet result")
-        self.assertNotIn("fleet_daily", result,
-                         "fleet_daily deferred to C19 — must not appear in C18 payload")
+        self.assertIsInstance(result["fleet_daily"], list,
+                              "fleet_daily must be a list")
 
 
 class TestHttpFleet(unittest.TestCase):
@@ -3574,14 +3574,14 @@ class TestHttpFleet(unittest.TestCase):
             return json.loads(r.read()), r
 
     def test_api_fleet_returns_json(self):
-        """/api/fleet → 200, application/json, required keys present; fleet_daily absent (C18)."""
+        """/api/fleet → 200, application/json, required keys present incl. fleet_daily (C19)."""
         data, resp = self._json("/api/fleet")
         self.assertEqual(resp.status, 200)
         self.assertIn("application/json", resp.headers.get("Content-Type", ""))
-        for k in ("nodes", "fleet", "local_node"):
+        for k in ("nodes", "fleet", "local_node", "fleet_daily"):
             self.assertIn(k, data, f"key '{k}' missing from /api/fleet")
-        self.assertNotIn("fleet_daily", data,
-                         "fleet_daily deferred to C19 — must not appear in C18 response")
+        self.assertIsInstance(data["fleet_daily"], list,
+                              "fleet_daily must be a list")
 
     def test_api_fleet_days_clamp_large(self):
         """/api/fleet?days=9999 → days clamped to KEEP_DAYS."""
@@ -3592,6 +3592,52 @@ class TestHttpFleet(unittest.TestCase):
         """/api/fleet?days=abc → days defaults to 30."""
         data, _ = self._json("/api/fleet?days=abc")
         self.assertEqual(data["days"], 30)
+
+
+class TestDashboardIdContract(unittest.TestCase):
+    """Verify that every element-id the JS reads/writes exists in dashboard.html.
+
+    This is a static contract test: if a JS refactor renames or removes an id
+    that render() / renderFleet() / etc. touch, this test catches it.
+    """
+
+    REQUIRED_IDS = [
+        # budget
+        "budget-card", "budget-banner", "bb-msg", "bb-dismiss",
+        "l-month", "c-month-cost", "c-month-budget", "m-month", "c-month-forecast",
+        # spike
+        "spike-banner", "sb-msg", "sb-dismiss",
+        # today / window cards
+        "c-today-out", "c-today-in", "c-today-cost", "c-today-msgs",
+        "c-30d-cost", "c-7d-cost",
+        # cache + rtk
+        "c-cache", "m-cache", "c-rtk", "c-rtk-pct", "m-rtk",
+        # charts
+        "chart-daily", "chart-model", "chart-rate", "chart-history", "chart-fleet",
+        # tables
+        "t-feed", "t-projects", "t-models", "t-tools", "t-fleet",
+        # filters
+        "f-source", "f-project", "f-model", "f-clear",
+        # fleet panel
+        "fleet-panel", "fleet-win", "fleet-th-window",
+        # misc
+        "live-list", "status", "fx-note", "theme-toggle", "l-window", "l-cache",
+    ]
+
+    def _html(self):
+        here = Path(__file__).parent
+        p = here / "dashboard.html"
+        if not p.exists():
+            self.skipTest("dashboard.html not found alongside test file")
+        return p.read_text(encoding="utf-8")
+
+    def test_all_required_ids_present(self):
+        html = self._html()
+        missing = [id_ for id_ in self.REQUIRED_IDS if f'id="{id_}"' not in html]
+        self.assertEqual(
+            missing, [],
+            "dashboard.html is missing JS-required element ids: " + ", ".join(missing),
+        )
 
 
 if __name__ == "__main__":

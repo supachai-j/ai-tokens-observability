@@ -287,8 +287,8 @@ summary.
 
 ### 8. Frontend (`dashboard.html`)
 
-Single page, no build step, no framework. Chart.js from CDN; everything
-else is vanilla JS (~250 lines).
+Single page, no build step, no framework. Chart.js 4.4.9 from CDN;
+everything else is vanilla JS (~300 lines).
 
 - **State**: filters (project/model/days), currency, theme, live-on/off —
   the persistent ones in `localStorage`; one `lastSummary` object allows
@@ -299,6 +299,20 @@ else is vanilla JS (~250 lines).
 - **Theming**: `data-theme` attribute + CSS variable palettes, FOUC-safe
   inline bootstrap, `prefers-color-scheme` sync; chart colors are read from
   CSS variables on toggle, so charts re-skin with the page.
+- **Type / spacing system** (C19): spacing scale (`--s1`…`--s6`) and
+  font-size scale (`--fs-xs`…`--fs-hero`) defined on `:root`; inline styles
+  replaced with utility classes (`.panel`, `.card`, `.mt-section`,
+  `.section-gap`, `.csv-link`, `.table-scroll`).  All numeric cells carry
+  `font-variant-numeric: tabular-nums` via `td.num / th.num`.
+- **Chart polish** (C19): all bar datasets use `borderRadius: 4`;
+  `rateChart` likewise; `historyChart` suppresses dots at rest
+  (`pointRadius: 0`).  Mono tooltip font applied globally.
+- **Budget card alert** (C19): `render()` toggles `.card-alert-amber` /
+  `.card-alert-red` on `#budget-card` when `budget.crossed` is non-null,
+  giving a semantic left-border accent in addition to the banner.
+- **Fleet chart** (C19): stacked bar chart (`#chart-fleet`) rendered by
+  `renderFleet()` from `fleet_daily` — one dataset per node, one bar per
+  day.  Hidden automatically when fewer than two nodes are present.
 
 ## Data flow (one live update)
 
@@ -459,7 +473,7 @@ helper.
 - Per-project export flag (restore project dimension optionally)
 - Source filter on `/api/fleet` (Claude/Codex/Gemini breakdown per node)
 - Auto-export piggyback on the 30-min snapshot loop (cron is sufficient)
-- Stacked daily chart by node in the fleet panel (deferred to C19 UX revamp)
+- Stacked daily chart by node in the fleet panel (shipped in C19)
 
 ## Limitations / future ideas
 

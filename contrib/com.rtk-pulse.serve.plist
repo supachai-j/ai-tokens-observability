@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rtk-pulse.serve</string>
+
+  <!-- Adjust ProgramArguments to match your install:
+       - pipx install:  /Users/YOU/.local/bin/rtk-pulse
+       - git clone:     /Users/YOU/workspace/rtk/pulse.py
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/rtk-pulse</string>
+    <string>serve</string>
+    <string>--port</string>
+    <string>8377</string>
+  </array>
+
+  <!-- Optional: set RTK_PULSE_BUDGET here so the budget card is always active -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RTK_PULSE_BUDGET</key>
+    <string>50.0</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/rtk-pulse.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/rtk-pulse.err</string>
+</dict>
+</plist>

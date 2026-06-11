@@ -54,6 +54,8 @@ Parsing is **incremental**: a byte-offset index (`~/.config/rtk-pulse/index.json
 means only appended transcript data is re-read. A cold scan of ~300 MB takes
 under a second; live updates are near-free.
 
+> _Add dashboard screenshots here before publishing._
+
 ## Installation
 
 **Requirements**
@@ -66,7 +68,7 @@ under a second; live updates are near-free.
 - Internet access only for the Chart.js CDN and the USD→THB rate
   (both degrade gracefully offline)
 
-**Install**
+**Install via git clone (zero setup)**
 
 ```bash
 git clone https://github.com/supachai-j/ai-tokens-observability.git
@@ -78,6 +80,18 @@ python3 pulse.py serve --open
 That's it — no virtualenv, no dependencies. The dashboard is at
 <http://localhost:8377> (change with `--port`). It binds to `127.0.0.1`
 only, so nothing is exposed to the network.
+
+**Install via pipx (console script)**
+
+```bash
+pipx install git+https://github.com/supachai-j/ai-tokens-observability
+rtk-pulse serve --open
+```
+
+This installs the `rtk-pulse` command globally. `rtk-pulse` is a drop-in
+alias for `python3 pulse.py`; all subcommands and env vars work identically.
+`pyproject.toml` and `LICENSE` are packaging metadata — the two-file
+stdlib core (`pulse.py` + `dashboard.html`) is unchanged.
 
 **Optional setup**
 
@@ -102,7 +116,9 @@ export RTK_PULSE_BUDGET_ALERT=80,100
 export RTK_PULSE_TRACE_MAX=600
 ```
 
-**Uninstall** — delete the clone and `~/.config/rtk-pulse/`.
+**Uninstall**
+- clone: delete the clone directory and `~/.config/rtk-pulse/`
+- pipx: `pipx uninstall ai-tokens-observability` then delete `~/.config/rtk-pulse/`
 
 ## Usage
 
@@ -129,6 +145,52 @@ Add to `~/.claude/settings.json` to save a snapshot at the end of every session:
 }
 ```
 
+### Run as a background service (macOS launchd)
+
+To have the dashboard start automatically at login, install a LaunchAgent.
+Copy the sample from `contrib/com.rtk-pulse.serve.plist` or create it manually:
+
+```bash
+# 1. Create the plist (adjust path to match your install)
+cat > ~/Library/LaunchAgents/com.rtk-pulse.serve.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>         <string>com.rtk-pulse.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!-- pipx install:  /Users/YOU/.local/bin/rtk-pulse serve -->
+    <!-- git clone:     /Users/YOU/workspace/rtk/pulse.py serve -->
+    <string>/Users/YOU/.local/bin/rtk-pulse</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key>  <true/>
+  <key>KeepAlive</key>  <true/>
+  <key>StandardOutPath</key> <string>/tmp/rtk-pulse.log</string>
+  <key>StandardErrorPath</key> <string>/tmp/rtk-pulse.err</string>
+</dict>
+</plist>
+EOF
+
+# 2. Load it (starts immediately)
+launchctl load -w ~/Library/LaunchAgents/com.rtk-pulse.serve.plist
+
+# 3. To stop / unload:
+launchctl unload -w ~/Library/LaunchAgents/com.rtk-pulse.serve.plist
+```
+
+**Automate snapshots and weekly digest via cron / launchd**
+
+Combine the [SessionEnd hook](#auto-snapshot-via-claude-code-hook-optional)
+above (snapshot after every session) with a weekly cron for the digest:
+
+```cron
+# Weekly digest every Monday at 09:00 (JSON → pipe to mail/Slack/etc.)
+0 9 * * 1  rtk-pulse digest --format json >> ~/rtk-pulse-digest.jsonl
+```
+
 ## Cost model
 
 Estimates use API list prices per MTok — e.g. Fable 5 $10/$50 · Opus
@@ -145,12 +207,20 @@ repeat the same `usage` on adjacent lines, so events are deduped on
 ## Files
 
 ```
-pulse.py            CLI + collector + HTTP/SSE server (stdlib only)
-dashboard.html      light/dark dashboard (Chart.js via CDN)
-docs/ARCHITECTURE.md  design & architecture overview
+pulse.py                 CLI + collector + HTTP/SSE server (stdlib only)
+dashboard.html           light/dark dashboard (Chart.js via CDN)
+pyproject.toml           packaging metadata (pipx/pip install)
+LICENSE                  MIT
+contrib/
+  com.rtk-pulse.serve.plist  sample macOS LaunchAgent
+docs/ARCHITECTURE.md     design & architecture overview
 ```
 
 ## Documentation
 
 - [Architecture overview](docs/ARCHITECTURE.md) — components, data flow,
   index design, cost model, API, and design decisions.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

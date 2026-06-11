@@ -246,6 +246,29 @@ Claude Code appends to a transcript
 | filters server-side, cosmetics client-side | aggregation needs the full index; theme/currency are pure presentation |
 | loopback bind only | usage data is sensitive (project names, spend); never exposed beyond the machine |
 
+## Packaging layer
+
+`pyproject.toml` adds a thin packaging layer without changing the two-file
+core:
+
+| Artifact | Purpose |
+|---|---|
+| `pyproject.toml` | setuptools ≥61 build config; declares `rtk-pulse` console script pointing to `pulse:main` |
+| `LICENSE` | MIT |
+| `contrib/com.rtk-pulse.serve.plist` | sample macOS LaunchAgent |
+
+The wheel ships `dashboard.html` as a data file under `share/rtk-pulse/`
+(installed to `{prefix}/share/rtk-pulse/dashboard.html`). `_dashboard_path()`
+in `pulse.py` resolves the correct copy:
+
+1. `SCRIPT_DIR/dashboard.html` — git-clone / `python3 pulse.py serve` (**unchanged behaviour**)
+2. `{sys.prefix}/share/rtk-pulse/dashboard.html` — pip/pipx wheel install
+
+If neither exists the function returns candidate 1, which triggers the
+existing `OSError → "dashboard.html not found"` fallback in `do_GET`.
+`python3 pulse.py serve` from a clone continues to work without any
+`pyproject.toml` involvement.
+
 ## Limitations / future ideas
 
 - Costs assume API list prices; subscription plans (Pro/Max) bill differently.

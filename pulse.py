@@ -1264,6 +1264,25 @@ def cmd_digest(days, fmt):
 
 # ---------------------------------------------------------------- web server
 
+
+def _dashboard_path():
+    """Resolve dashboard.html for both clone/dev and pip/pipx installed setups.
+
+    Search order:
+    1. SCRIPT_DIR/dashboard.html  — git-clone / `python3 pulse.py serve` (current behaviour)
+    2. sys.prefix/share/rtk-pulse/dashboard.html — pip/pipx wheel install (data-files)
+    Returns candidate 1 unconditionally as fallback so the existing
+    OSError → "dashboard.html not found" path in do_GET still triggers.
+    """
+    dev = SCRIPT_DIR / "dashboard.html"
+    if dev.exists():
+        return dev
+    installed = Path(sys.prefix) / "share" / "rtk-pulse" / "dashboard.html"
+    if installed.exists():
+        return installed
+    return dev  # triggers OSError in do_GET if neither exists
+
+
 def _fs_state():
     """Cheap change detector across all tools: (file count, total size, max mtime)."""
     n = total = newest = 0
@@ -1308,7 +1327,7 @@ class Handler(BaseHTTPRequestHandler):
             days = 30
         if route in ("/", "/index.html"):
             try:
-                body = (SCRIPT_DIR / "dashboard.html").read_bytes()
+                body = _dashboard_path().read_bytes()
             except OSError:
                 body = b"dashboard.html not found"
             self._send(200, "text/html; charset=utf-8", body)

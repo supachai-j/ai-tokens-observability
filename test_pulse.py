@@ -1978,5 +1978,29 @@ class TestCmdDigest(unittest.TestCase):
         self.assertIn("days", d["period"])
 
 
+# ---------------------------------------------------------------------------
+# TestDashboardPath — _dashboard_path() resolves the dev-tree copy
+# ---------------------------------------------------------------------------
+
+class TestDashboardPath(unittest.TestCase):
+    def test_returns_existing_file_in_dev_tree(self):
+        """In the dev/clone tree SCRIPT_DIR/dashboard.html exists and is returned."""
+        path = pulse._dashboard_path()
+        self.assertTrue(path.exists(),
+                        f"_dashboard_path() returned {path} which does not exist")
+        self.assertEqual(path.name, "dashboard.html")
+
+    def test_returns_path_object(self):
+        """Return value is a pathlib.Path, not a string."""
+        self.assertIsInstance(pulse._dashboard_path(), Path)
+
+    def test_falls_back_to_script_dir_when_neither_exists(self):
+        """When both candidates are absent, SCRIPT_DIR/dashboard.html is returned."""
+        with patch("pulse.SCRIPT_DIR", Path("/nonexistent/fake")), \
+             patch("pulse.sys.prefix", "/nonexistent/prefix"):
+            result = pulse._dashboard_path()
+        self.assertEqual(result, Path("/nonexistent/fake") / "dashboard.html")
+
+
 if __name__ == "__main__":
     unittest.main()

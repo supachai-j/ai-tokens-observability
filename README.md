@@ -94,6 +94,10 @@ export RTK_PULSE_HOME=~/somewhere/else
 # monthly spend limit in USD — enables the budget card + color-coded meter
 export RTK_PULSE_BUDGET=20.0
 
+# budget alert thresholds as % of limit (default: 80,100)
+# triggers a dashboard banner + native OS notification (once per threshold per month)
+export RTK_PULSE_BUDGET_ALERT=80,100
+
 # max trace steps shown in the session drilldown (default 600, min 50)
 export RTK_PULSE_TRACE_MAX=600
 ```

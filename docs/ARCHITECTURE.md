@@ -111,9 +111,28 @@ produces the one JSON payload the frontend consumes: today + window totals,
 per-day series (stacked by model), by-model and by-project rollups, cache
 hit rate, live sessions, activity feed, per-minute throughput, dropdown
 domains (`projects`, `models`), FX rate, the rtk savings summary, and a
-`budget` sub-object `{limit, month_cost, month}` — `limit` comes from the
-`RTK_PULSE_BUDGET` env var (USD float); the frontend renders a color-coded
-spend-vs-limit meter when it is set.
+`budget` sub-object:
+
+```json
+{
+  "limit":      100.0,       // from RTK_PULSE_BUDGET (USD), null if unset
+  "month_cost": 85.3,        // current month spend
+  "month":      "2026-06",   // YYYY-MM
+  "pct":        85.3,        // month_cost/limit*100, null when no limit
+  "thresholds": [80.0,100.0],// from RTK_PULSE_BUDGET_ALERT (default 80,100)
+  "crossed":    80.0         // highest threshold ≤ pct, or null
+}
+```
+
+`limit` comes from `RTK_PULSE_BUDGET` (USD float); the frontend renders a
+color-coded spend-vs-limit meter when it is set. `crossed` drives two
+notification paths that fire outside the SSE loop (see §6 below):
+1. **Dashboard banner** — shown above the cards grid when `crossed` is set;
+   amber for crossed < 100, red for crossed ≥ 100; dismissible per
+   `month:crossed` key in `localStorage` so a higher crossing re-shows it.
+2. **Native OS notification** — `notify_budget()` fires once per threshold
+   per month via `osascript` (macOS) or `notify-send` (Linux); state
+   persisted in `budget_alert.json`.
 
 ### 4. Cost model (`PRICING`, `cost_usd`)
 
@@ -155,6 +174,15 @@ the 90-day index window — this makes it the only durable long-term record.
 `read_history()` parses the file, dedupes to one record per calendar day
 (last snapshot of the day wins), and is served by `GET /api/history` to
 power the long-term daily-cost trend panel in the dashboard.
+
+After writing the history line, `save_snapshot` calls `notify_budget(summary)`
+in a try/except so notification failures can never break snapshotting. This
+wires budget alerts to every snapshot trigger (serve start, 30-min loop, and
+`pulse.py save` / SessionEnd hook) without ever touching the SSE hot path.
+`notify_budget` reads `budget.crossed` from the summary; if set and greater
+than the last alerted level for the current month (state in
+`~/.config/rtk-pulse/budget_alert.json`), it fires a native notification and
+updates the state file. A month rollover resets the alerted level.
 
 ### 7. FX resolver (`fx_thb`)
 

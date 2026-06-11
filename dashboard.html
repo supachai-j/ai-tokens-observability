@@ -133,6 +133,17 @@
   canvas { max-height: 260px; }
   #feed-wrap { max-height: 280px; overflow-y: auto; }
   footer { color: var(--dim); font-size: 11px; margin-top: 16px; }
+  #budget-banner {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
+    border: 1px solid var(--border); font-size: 13px;
+  }
+  #budget-banner .bb-msg { flex: 1; }
+  #budget-banner .bb-dismiss {
+    background: none; border: none; color: inherit; font-size: 16px;
+    cursor: pointer; padding: 0 4px; opacity: .7; line-height: 1;
+  }
+  #budget-banner .bb-dismiss:hover { opacity: 1; }
 </style>
 </head>
 <body>
@@ -177,6 +188,11 @@
   <button class="clear" id="f-clear" type="button">× clear filters</button>
   <label class="switch" title="Enable/disable live monitoring">live monitoring
     <input type="checkbox" id="f-live" checked><span class="track"></span></label>
+</div>
+
+<div id="budget-banner" hidden>
+  <span class="bb-msg" id="bb-msg"></span>
+  <button class="bb-dismiss" id="bb-dismiss" type="button" title="Dismiss">×</button>
 </div>
 
 <div class="cards">
@@ -380,13 +396,35 @@ function render(s) {
     $('l-month').textContent = esc(b.month) + ' · est. cost';
     $('c-month-cost').textContent = usd(b.month_cost);
     if (b.limit) {
-      const pct = b.month_cost / b.limit * 100;
+      const pct = b.pct != null ? b.pct : b.month_cost / b.limit * 100;
       $('c-month-budget').textContent = 'of ' + sym() + (b.limit * rate()).toFixed(2) + ' · ' + pct.toFixed(1) + '%';
       $('m-month').style.width = Math.min(100, pct) + '%';
       $('m-month').style.background = pct > 100 ? cssVar('--red') : pct > 80 ? cssVar('--amber') : cssVar('--green');
     } else {
       $('c-month-budget').textContent = 'no budget set';
       $('m-month').style.width = '0%';
+    }
+    // budget alert banner
+    const banner = $('budget-banner');
+    if (b.crossed != null) {
+      const dismissKey = esc(b.month) + ':' + b.crossed;
+      let dismissed = false;
+      try { dismissed = localStorage.getItem('budgetDismiss') === dismissKey; } catch (e) {}
+      if (!dismissed) {
+        const pct2 = b.pct != null ? b.pct : b.month_cost / b.limit * 100;
+        $('bb-msg').textContent =
+          '⚠ Budget alert — you\'ve used ' + pct2.toFixed(1) + '% of your ' +
+          sym() + (b.limit * rate()).toFixed(2) + ' ' + esc(b.month) + ' budget.';
+        banner.style.background = b.crossed >= 100 ? cssVar('--red') + '22' : cssVar('--amber') + '22';
+        banner.style.borderColor = b.crossed >= 100 ? cssVar('--red') : cssVar('--amber');
+        banner.style.color = b.crossed >= 100 ? cssVar('--red') : cssVar('--amber');
+        banner.removeAttribute('hidden');
+        $('bb-dismiss')._dismissKey = dismissKey;
+      } else {
+        banner.setAttribute('hidden', '');
+      }
+    } else {
+      banner.setAttribute('hidden', '');
     }
   }
   $('c-cache').textContent = (s.cache_hit_rate * 100).toFixed(1) + '%';
@@ -588,6 +626,11 @@ function loadTrace() {
 }
 $('tr-load').addEventListener('click', loadTrace);
 $('tr-session').addEventListener('change', loadTrace);
+$('bb-dismiss').addEventListener('click', () => {
+  const key = $('bb-dismiss')._dismissKey;
+  if (key) { try { localStorage.setItem('budgetDismiss', key); } catch (e) {} }
+  $('budget-banner').setAttribute('hidden', '');
+});
 function setLive(on) {
   liveOn = on;
   try { localStorage.setItem('live', on ? '1' : '0'); } catch (e) {}

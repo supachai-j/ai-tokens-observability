@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -36,6 +37,7 @@ GEMINI_TMP = Path.home() / ".gemini" / "tmp"
 DATA_DIR = Path(os.environ.get("RTK_PULSE_HOME", Path.home() / ".config" / "rtk-pulse"))
 INDEX_FILE = DATA_DIR / "index.json"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
+BUDGET_ALERT_FILE = DATA_DIR / "budget_alert.json"
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PORT = 8377
 LIVE_WINDOW_MIN = 10  # a project counts as "live" if active within this many minutes
@@ -528,6 +530,51 @@ def _budget_limit():
         return None
 
 
+def _budget_thresholds():
+    """Read RTK_PULSE_BUDGET_ALERT → sorted ascending list of positive floats.
+
+    Default is [80.0, 100.0].  Invalid / blank tokens are silently skipped.
+    If the var is unset or yields no valid values the default is returned.
+    """
+    raw = os.environ.get("RTK_PULSE_BUDGET_ALERT", "80,100")
+    result = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = float(tok)
+            if v > 0:
+                result.append(v)
+        except ValueError:
+            pass
+    return sorted(result) if result else [80.0, 100.0]
+
+
+def _build_budget(month_cost, current_month):
+    """Build the budget sub-object for build_summary."""
+    limit = _budget_limit()
+    thresholds = _budget_thresholds()
+    if limit:
+        pct = round(month_cost / limit * 100, 2)
+        # highest threshold that has been crossed (≤ pct), or None
+        crossed = None
+        for t in thresholds:
+            if t <= pct:
+                crossed = t
+    else:
+        pct = None
+        crossed = None
+    return {
+        "limit": limit,
+        "month_cost": month_cost,
+        "month": current_month,
+        "pct": pct,
+        "thresholds": thresholds,
+        "crossed": crossed,
+    }
+
+
 def build_summary(idx, project=None, model=None, days=30, source=None):
     now = datetime.now().astimezone()
     today = now.strftime("%Y-%m-%d")
@@ -627,8 +674,7 @@ def build_summary(idx, project=None, model=None, days=30, source=None):
         "sources": all_sources,
         "fx": dict(zip(("thb", "src"), fx_thb())),
         "rtk": rtk_gain(),
-        "budget": {"limit": _budget_limit(), "month_cost": month_cost,
-                   "month": current_month},
+        "budget": _build_budget(month_cost, current_month),
     }
 
 
@@ -923,6 +969,10 @@ def save_snapshot(summary=None):
             tmp.replace(HISTORY_FILE)
     except OSError:
         pass
+    try:
+        notify_budget(summary)
+    except Exception:
+        pass
     return line
 
 
@@ -932,6 +982,51 @@ def _history_date(line):
         return json.loads(line).get("date", "")
     except ValueError:
         return ""
+
+
+def notify_budget(summary):
+    """Fire a native OS notification when a new budget threshold is crossed.
+
+    State is persisted in BUDGET_ALERT_FILE so each threshold fires at most once
+    per calendar month.  A new month or a higher crossing re-triggers the alert.
+    Safe to call from any thread — all exceptions are swallowed.
+    """
+    b = (summary or {}).get("budget") or {}
+    crossed = b.get("crossed")
+    if crossed is None:
+        return
+    month = b.get("month") or ""
+    limit = b.get("limit") or 0
+    pct = b.get("pct") or 0
+    # Read state
+    try:
+        with open(BUDGET_ALERT_FILE) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    alerted = state.get("alerted", 0) if state.get("month") == month else 0
+    if crossed <= alerted:
+        return
+    # Persist new state before firing (so a crash in notify doesn't re-fire)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(BUDGET_ALERT_FILE, "w") as f:
+            json.dump({"month": month, "alerted": crossed}, f)
+    except OSError:
+        pass
+    msg = f"Month-to-date {pct:.1f}% of ${limit:.2f} budget ({month})"
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(
+                ["osascript", "-e",
+                 f'display notification "{msg}" with title "AI Tokens Observability"'],
+                timeout=5, capture_output=True)
+        elif shutil.which("notify-send"):
+            subprocess.run(
+                ["notify-send", "AI Tokens Observability", msg],
+                timeout=5, capture_output=True)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def read_history(max_days=None):

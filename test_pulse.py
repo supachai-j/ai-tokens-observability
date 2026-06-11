@@ -1543,5 +1543,210 @@ class TestReadHistory(unittest.TestCase):
         self.assertEqual(result[0]["in"], 300)  # 200 + 50 + 30 + 20
 
 
+# ---------------------------------------------------------------------------
+# TestBudgetThresholds — _budget_thresholds() parsing
+# ---------------------------------------------------------------------------
+
+class TestBudgetThresholds(unittest.TestCase):
+    def test_default_when_unset(self):
+        """Unset env → default [80.0, 100.0]."""
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k != "RTK_PULSE_BUDGET_ALERT"}
+        with patch.dict("os.environ", env, clear=True):
+            self.assertEqual(pulse._budget_thresholds(), [80.0, 100.0])
+
+    def test_custom_thresholds(self):
+        """'50,75,90' → [50.0, 75.0, 90.0] sorted ascending."""
+        with patch.dict("os.environ", {"RTK_PULSE_BUDGET_ALERT": "50,75,90"}):
+            self.assertEqual(pulse._budget_thresholds(), [50.0, 75.0, 90.0])
+
+    def test_invalid_tokens_skipped(self):
+        """Invalid tokens ('bad', negative) are ignored; valid ones kept."""
+        with patch.dict("os.environ", {"RTK_PULSE_BUDGET_ALERT": "50,bad,,-5,90"}):
+            self.assertEqual(pulse._budget_thresholds(), [50.0, 90.0])
+
+    def test_all_invalid_falls_back_to_default(self):
+        """All-invalid input yields the default [80.0, 100.0]."""
+        with patch.dict("os.environ", {"RTK_PULSE_BUDGET_ALERT": "bad,,,"}):
+            self.assertEqual(pulse._budget_thresholds(), [80.0, 100.0])
+
+    def test_empty_string_falls_back_to_default(self):
+        """Empty string env value yields the default."""
+        with patch.dict("os.environ", {"RTK_PULSE_BUDGET_ALERT": ""}):
+            self.assertEqual(pulse._budget_thresholds(), [80.0, 100.0])
+
+    def test_unsorted_input_returns_sorted(self):
+        """Thresholds are returned in ascending order regardless of input order."""
+        with patch.dict("os.environ", {"RTK_PULSE_BUDGET_ALERT": "100,50,80"}):
+            self.assertEqual(pulse._budget_thresholds(), [50.0, 80.0, 100.0])
+
+
+# ---------------------------------------------------------------------------
+# TestBuildSummaryBudgetAlert — pct / crossed fields in build_summary
+# ---------------------------------------------------------------------------
+
+class TestBuildSummaryBudgetAlert(unittest.TestCase):
+    """build_summary budget dict includes pct, thresholds, crossed."""
+
+    def _make_idx(self, cost):
+        """Index with `cost` USD in the current month."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        idx = pulse._empty_index()
+        idx["days"][today] = {
+            "projA": {"claude-sonnet-4-5": {
+                "in": 100, "out": 50, "cc5": 0, "cc1": 0, "cr": 0,
+                "n": 1, "cost": cost}},
+        }
+        return idx
+
+    def _summary(self, cost, limit_str, alert_str="80,100"):
+        idx = self._make_idx(cost)
+        env = {"RTK_PULSE_BUDGET": limit_str,
+               "RTK_PULSE_BUDGET_ALERT": alert_str}
+        with patch.dict("os.environ", env), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            return pulse.build_summary(idx, days=90)
+
+    def test_pct_below_all_thresholds(self):
+        """50% spend → pct ~50, crossed=None."""
+        s = self._summary(50.0, "100")
+        b = s["budget"]
+        self.assertAlmostEqual(b["pct"], 50.0, places=1)
+        self.assertIsNone(b["crossed"])
+
+    def test_pct_above_first_threshold(self):
+        """85% spend → crossed=80."""
+        s = self._summary(85.0, "100")
+        b = s["budget"]
+        self.assertAlmostEqual(b["pct"], 85.0, places=1)
+        self.assertEqual(b["crossed"], 80.0)
+
+    def test_pct_above_second_threshold(self):
+        """103% spend → crossed=100."""
+        s = self._summary(103.0, "100")
+        b = s["budget"]
+        self.assertAlmostEqual(b["pct"], 103.0, places=1)
+        self.assertEqual(b["crossed"], 100.0)
+
+    def test_no_limit_pct_and_crossed_are_none(self):
+        """No budget set → pct=None, crossed=None."""
+        idx = self._make_idx(50.0)
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k not in ("RTK_PULSE_BUDGET", "RTK_PULSE_BUDGET_ALERT")}
+        with patch.dict("os.environ", env, clear=True), \
+             patch("pulse.rtk_gain", return_value=None), \
+             patch("pulse.fx_thb", return_value=(32.0, "test")):
+            s = pulse.build_summary(idx, days=90)
+        self.assertIsNone(s["budget"]["pct"])
+        self.assertIsNone(s["budget"]["crossed"])
+
+    def test_thresholds_present_in_budget(self):
+        """budget dict always contains a 'thresholds' list."""
+        s = self._summary(50.0, "100", alert_str="60,90")
+        self.assertEqual(s["budget"]["thresholds"], [60.0, 90.0])
+
+
+# ---------------------------------------------------------------------------
+# TestNotifyBudget — notify_budget() fire-once-per-threshold logic
+# ---------------------------------------------------------------------------
+
+class TestNotifyBudget(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+        self.alert_file = self.data_dir / "budget_alert.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _summary(self, crossed, month="2026-06", pct=85.0, limit=100.0):
+        return {
+            "budget": {
+                "crossed": crossed,
+                "month": month,
+                "pct": pct,
+                "limit": limit,
+            }
+        }
+
+    def _notify(self, summary):
+        with patch("pulse.DATA_DIR", self.data_dir), \
+             patch("pulse.BUDGET_ALERT_FILE", self.alert_file):
+            pulse.notify_budget(summary)
+
+    def test_no_crossed_is_noop(self):
+        """crossed=None → subprocess never called."""
+        with patch("pulse.subprocess.run") as mock_run:
+            self._notify(self._summary(crossed=None))
+            mock_run.assert_not_called()
+
+    def test_fires_on_first_cross(self):
+        """First time a threshold is crossed → notification fires."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary(crossed=80.0))
+            mock_run.assert_called_once()
+
+    def test_does_not_refire_same_threshold(self):
+        """Same threshold for same month → fires only once."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary(crossed=80.0))
+            self._notify(self._summary(crossed=80.0))
+            self.assertEqual(mock_run.call_count, 1)
+
+    def test_refires_on_higher_threshold(self):
+        """After alerted=80, crossing 100 fires again."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary(crossed=80.0))
+            self._notify(self._summary(crossed=100.0, pct=103.0))
+            self.assertEqual(mock_run.call_count, 2)
+
+    def test_resets_and_refires_on_month_change(self):
+        """New month → alerted resets; same threshold fires again."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary(crossed=80.0, month="2026-05"))
+            self._notify(self._summary(crossed=80.0, month="2026-06"))
+            self.assertEqual(mock_run.call_count, 2)
+
+    def test_state_persisted_to_file(self):
+        """After firing, budget_alert.json reflects the new alerted level."""
+        with patch("pulse.subprocess.run"), \
+             patch("pulse.sys.platform", "darwin"):
+            self._notify(self._summary(crossed=80.0, month="2026-06"))
+        state = json.loads(self.alert_file.read_text())
+        self.assertEqual(state["month"], "2026-06")
+        self.assertEqual(state["alerted"], 80.0)
+
+    def test_subprocess_error_swallowed(self):
+        """OSError in subprocess does not propagate."""
+        with patch("pulse.subprocess.run", side_effect=OSError("no osascript")), \
+             patch("pulse.sys.platform", "darwin"):
+            # Should not raise
+            self._notify(self._summary(crossed=80.0))
+
+    def test_linux_uses_notify_send(self):
+        """On Linux with notify-send available, notify-send is invoked."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "linux"), \
+             patch("pulse.shutil.which", return_value="/usr/bin/notify-send"):
+            self._notify(self._summary(crossed=80.0))
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            self.assertEqual(cmd[0], "notify-send")
+
+    def test_linux_no_notify_send_skips(self):
+        """On Linux without notify-send, no subprocess is spawned."""
+        with patch("pulse.subprocess.run") as mock_run, \
+             patch("pulse.sys.platform", "linux"), \
+             patch("pulse.shutil.which", return_value=None):
+            self._notify(self._summary(crossed=80.0))
+            mock_run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

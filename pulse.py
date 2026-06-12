@@ -14,6 +14,8 @@ Data sources:
   rtk gain --format json          rtk token-savings analytics (optional)
 """
 
+__version__ = "0.1.0"
+
 import argparse
 import calendar
 import csv
@@ -2040,6 +2042,7 @@ def cmd_serve(port, open_browser):
 def main():
     ap = argparse.ArgumentParser(prog="ai-tokens-observability", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("serve", help="live web dashboard")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)

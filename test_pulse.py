@@ -3594,6 +3594,41 @@ class TestHttpFleet(unittest.TestCase):
         self.assertEqual(data["days"], 30)
 
 
+class TestVersionSync(unittest.TestCase):
+    """pulse.__version__ must match [project].version in pyproject.toml."""
+
+    def test_version_attribute_exists(self):
+        self.assertTrue(hasattr(pulse, "__version__"), "pulse.__version__ is missing")
+        self.assertRegex(pulse.__version__, r"^\d+\.\d+\.\d+",
+                         "__version__ must be a semver string")
+
+    def test_version_matches_pyproject(self):
+        """pyproject.toml [project].version must equal pulse.__version__."""
+        here = Path(__file__).parent
+        pyproject = here / "pyproject.toml"
+        if not pyproject.exists():
+            self.skipTest("pyproject.toml not found alongside test file")
+        text = pyproject.read_text(encoding="utf-8")
+        import re
+        m = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        self.assertIsNotNone(m, "version not found in pyproject.toml")
+        self.assertEqual(
+            pulse.__version__, m.group(1),
+            f"pulse.__version__ ({pulse.__version__!r}) ≠ "
+            f"pyproject.toml version ({m.group(1)!r})",
+        )
+
+    def test_version_flag(self):
+        """python3 pulse.py --version exits 0 and prints the version."""
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "pulse.py"), "--version"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(pulse.__version__, result.stdout + result.stderr)
+
+
 class TestDashboardIdContract(unittest.TestCase):
     """Verify that every element-id the JS reads/writes exists in dashboard.html.
 

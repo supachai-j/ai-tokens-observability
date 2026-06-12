@@ -1,0 +1,51 @@
+name: Feature Request
+description: Suggest an improvement or new capability
+labels: [enhancement]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Please check the design pillars
+        in [CONTRIBUTING.md](../../CONTRIBUTING.md) before submitting —
+        proposals that require new runtime dependencies or network
+        exposure are unlikely to be accepted.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? Who is affected?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe what you'd like to see added or changed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approaches you thought about?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check — this request
+      description: >
+        Please confirm your proposal fits the project's hard constraints.
+        Both boxes must be checked for the request to be considered.
+      options:
+        - label: >
+            Stays **stdlib-only** — does not require any new runtime
+            dependencies (`pip install` / third-party packages)
+          required: true
+        - label: >
+            Stays **local-only** — does not add new outbound network
+            calls from the server
+          required: true

@@ -171,14 +171,20 @@ def wait_url(url: str, retries: int = 30, delay: float = 0.5) -> None:
 
 
 def verify_isolation(base_url: str) -> None:
-    """Abort if /api/summary reveals any real project names."""
+    """Abort if /api/summary reveals any real project or node names."""
+    import socket as _socket
+    real_hostname = _socket.gethostname()
+
     try:
         resp = urllib.request.urlopen(base_url + "/api/summary", timeout=10)
         data = json.load(resp)
     except Exception as exc:
         print(f"  [warn] /api/summary unreachable ({exc}); skipping isolation check")
         return
-    # projects key may be dict or list depending on version
+
+    payload_text = json.dumps(data)
+
+    # Check project names
     raw = data.get("projects") or {}
     if isinstance(raw, dict):
         projects = set(raw.keys())
@@ -186,16 +192,26 @@ def verify_isolation(base_url: str) -> None:
         projects = set(raw)
     if not projects:
         print("  isolation check: 0 projects returned (scanner may still be indexing)")
-        return
-    real = projects - SYNTHETIC_PROJECTS
-    if real:
+    else:
+        real = projects - SYNTHETIC_PROJECTS
+        if real:
+            raise RuntimeError(
+                f"\n\n*** ISOLATION FAILURE ***\n"
+                f"Real project names detected in /api/summary: {sorted(real)}\n"
+                f"Full project set: {sorted(projects)}\n"
+                f"ABORT — screenshot not taken."
+            )
+        print(f"  projects OK: {sorted(projects)}")
+
+    # Defense-in-depth: real hostname must not appear anywhere in the payload
+    if real_hostname and real_hostname in payload_text:
         raise RuntimeError(
             f"\n\n*** ISOLATION FAILURE ***\n"
-            f"Real project names detected in /api/summary: {sorted(real)}\n"
-            f"Full project set: {sorted(projects)}\n"
+            f"Real hostname {real_hostname!r} found in /api/summary payload.\n"
+            f"Set RTK_PULSE_NODE env var to a synthetic name before capturing.\n"
             f"ABORT — screenshot not taken."
         )
-    print(f"  isolation OK: {sorted(projects)}")
+    print(f"  hostname {real_hostname!r} not in payload ✓")
 
 
 def cdp_ws_path(debug_port: int) -> str:
@@ -225,8 +241,13 @@ def js_eval(cdp: CDPClient, expr: str) -> object:
 
 
 def capture_one(base_url: str, debug_port: int, theme: str,
-                out_path: Path, label: str) -> None:
-    """Open a fresh CDP connection, navigate with light/dark theme, screenshot."""
+                out_path: Path, label: str,
+                clip_selector: str = None) -> None:
+    """Open a fresh CDP connection, navigate with light/dark theme, screenshot.
+
+    clip_selector: optional CSS selector — if given, crop the screenshot to
+    that element's bounding box (page-relative, so works with long pages).
+    """
     print(f"\n  → Capturing {label} …")
     ws_path = cdp_ws_path(debug_port)
     cdp = CDPClient("127.0.0.1", debug_port, ws_path)
@@ -264,12 +285,34 @@ def capture_one(base_url: str, debug_port: int, theme: str,
             print(f"    data-theme after force={actual!r}")
             assert actual == theme, f"Could not force theme to {theme!r}"
 
-        # Full-page screenshot (captures content beyond viewport)
-        cid = cdp.call("Page.captureScreenshot", {
-            "format": "png",
-            "captureBeyondViewport": True,
-            "fromSurface": True,
-        })
+        # Build screenshot params
+        shot_params: dict = {"format": "png", "captureBeyondViewport": True,
+                             "fromSurface": True}
+
+        if clip_selector:
+            # Get element's page-relative bounding box
+            rect_json = js_eval(cdp, f"""
+                (function() {{
+                    var el = document.querySelector({json.dumps(clip_selector)});
+                    if (!el) return null;
+                    var r = el.getBoundingClientRect();
+                    return JSON.stringify({{
+                        x: Math.max(0, r.left + window.scrollX - 16),
+                        y: Math.max(0, r.top  + window.scrollY - 16),
+                        width:  r.width  + 32,
+                        height: r.height + 32
+                    }});
+                }})()
+            """)
+            if not rect_json:
+                print(f"    [warn] element {clip_selector!r} not found; falling back to full page")
+            else:
+                rect = json.loads(rect_json)
+                shot_params["clip"] = {**rect, "scale": 1}
+                print(f"    clip: x={rect['x']:.0f} y={rect['y']:.0f} "
+                      f"w={rect['width']:.0f} h={rect['height']:.0f}")
+
+        cid = cdp.call("Page.captureScreenshot", shot_params)
         result = cdp.wait_id(cid, timeout=30)
         png = base64.b64decode(result["result"]["data"])
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,6 +374,9 @@ def main() -> None:
                 **os.environ,
                 "RTK_PULSE_HOME": str(rtk_home),
                 "HOME":           str(fake_home),
+                # Override local node name so fleet panel shows the synthetic
+                # name from seed_demo.py FAKE_NODES, not the real machine hostname.
+                "RTK_PULSE_NODE": "macbook-pro",
             }
             server_proc = subprocess.Popen(
                 [sys.executable,
@@ -378,15 +424,16 @@ def main() -> None:
                 label="dashboard-light (full page, light theme)",
             )
 
-            # 5b. Fleet panel — re-use same light theme, full page
-            # (captureBeyondViewport captures the fleet section which is
-            # lower on the page; both shots serve as light + fleet evidence)
+            # 5b. Fleet panel — cropped close-up of the #fleet-panel element
+            # getBoundingClientRect() + captureScreenshot clip so it's a real
+            # multi-machine close-up, not a duplicate of the full dashboard.
             capture_one(
                 base_url=base_url,
                 debug_port=debug_port,
                 theme="light",
                 out_path=out_dir / "dashboard-fleet.png",
-                label="dashboard-fleet (full page showing fleet panel)",
+                label="dashboard-fleet (#fleet-panel crop)",
+                clip_selector="#fleet-panel",
             )
 
         except Exception as exc:   # noqa: BLE001

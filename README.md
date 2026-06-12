@@ -60,6 +60,10 @@ under a second; live updates are near-free.
 
 ![AI Tokens Observability dashboard — dark theme](docs/screenshots/dashboard-dark.png)
 
+![AI Tokens Observability dashboard — light theme](docs/screenshots/dashboard-light.png)
+
+![Fleet panel — multi-machine usage](docs/screenshots/dashboard-fleet.png)
+
 ## Installation
 
 **Requirements**

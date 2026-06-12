@@ -103,6 +103,22 @@ pipx uninstall ai-tokens-observability
 
 ---
 
+## Publishing to PyPI (optional post-release step)
+
+After the GitHub Release is live, you can publish to PyPI via the
+**Trusted Publishing** workflow. This step is fully user-gated — the CI
+workflow is staged but will not run until you complete a one-time
+registration on pypi.org.
+
+See **[PUBLISHING.md](PUBLISHING.md)** for:
+- One-time Trusted Publisher registration on pypi.org (pending publisher flow)
+- Creating the `pypi` GitHub deployment environment (Settings → Environments)
+- Manual dispatch for v0.1.0 (its release predates the workflow)
+- Local build verification recipe (wheel smoke-test)
+- Optional TestPyPI dry-run
+
+---
+
 ## Notes
 
 - The repo must remain **private** until the `gh repo edit --visibility public`

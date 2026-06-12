@@ -1,5 +1,9 @@
 # AI Tokens Observability
 
+[![CI](https://github.com/supachai-j/ai-tokens-observability/actions/workflows/ci.yml/badge.svg)](https://github.com/supachai-j/ai-tokens-observability/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 Live token-usage **observability dashboard** for AI coding tools — **Claude
 Code, OpenAI Codex CLI, and Gemini CLI** — companion to
 [rtk](https://github.com/) (Rust Token Killer). Zero dependencies, single-file

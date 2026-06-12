@@ -19,13 +19,15 @@ AI Tokens Observability is a **local-only tool**. Its security model is:
 - **Outbound calls** — the only network activity is:
   1. The browser fetching Chart.js from the CDN (a standard browser
      request; the server does not proxy it).
-  2. An optional USD→THB exchange-rate lookup (`api.frankfurter.app`)
+  2. An optional USD→THB exchange-rate lookup (`open.er-api.com`)
      used only when THB display is enabled; the result is cached for 12
      hours and the feature degrades gracefully if the request fails.
-- **No authentication** — because the server is loopback-only and serves
-  no sensitive data over the network, there is no authentication layer.
-  If you need to expose the dashboard beyond localhost, use an SSH tunnel
-  or a reverse proxy with authentication — do not use `--host 0.0.0.0`.
+- **No authentication** — the server binds to loopback only; the bind
+  address is hard-coded to `127.0.0.1` and is not configurable, and no
+  sensitive data is served over the network, so there is no authentication
+  layer. To reach the dashboard from another machine, front it with an SSH
+  tunnel or an authenticating reverse proxy rather than exposing the port
+  directly.
 
 ## Supported versions
 

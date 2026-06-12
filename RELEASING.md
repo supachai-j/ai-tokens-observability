@@ -17,7 +17,7 @@ python3 -c "import pulse; print(pulse.__version__)"
 # must print: 0.1.0
 
 python3 pulse.py --version
-# must print: pulse.py 0.1.0
+# must print: ai-tokens-observability 0.1.0
 
 grep '^version' pyproject.toml
 # must print: version = "0.1.0"
@@ -96,7 +96,7 @@ gh repo view supachai-j/ai-tokens-observability --json visibility -q '.visibilit
 ```bash
 # Install from the now-public repo via pipx
 pipx install "git+https://github.com/supachai-j/ai-tokens-observability"
-rtk-pulse --version       # should print: rtk-pulse 0.1.0
+rtk-pulse --version       # should print: ai-tokens-observability 0.1.0
 rtk-pulse serve --open    # open dashboard, verify it loads
 pipx uninstall ai-tokens-observability
 ```

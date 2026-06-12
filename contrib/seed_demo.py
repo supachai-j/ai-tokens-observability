@@ -15,8 +15,6 @@ All project names, models, and costs are synthetic.
 
 import argparse
 import json
-import os
-import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -147,7 +145,7 @@ def build_fake_node_snapshot(node_name, daily_cost_usd, num_days=35):
     """Return a node snapshot dict (schema v1)."""
     now = datetime.now(tz=timezone.utc)
     import random
-    rng = random.Random(hash(node_name) & 0xFFFF)
+    rng = random.Random(sum(ord(c) for c in node_name))
     snap_days = {}
     for d in range(num_days, -1, -1):
         day_str = (now - timedelta(days=d)).strftime("%Y-%m-%d")

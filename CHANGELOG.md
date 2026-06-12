@@ -2,7 +2,7 @@
 
 All notable changes to **AI Tokens Observability** are documented here.
 
-## [0.1.0] — 2026-06-11
+## [0.1.0] — 2026-06-12
 
 First public release. Feature-complete for single-machine and multi-machine
 (fleet) token observability across Claude Code, Codex CLI, and Gemini CLI.

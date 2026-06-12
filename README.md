@@ -54,7 +54,7 @@ Parsing is **incremental**: a byte-offset index (`~/.config/rtk-pulse/index.json
 means only appended transcript data is re-read. A cold scan of ~300 MB takes
 under a second; live updates are near-free.
 
-> _Add dashboard screenshots here before publishing._
+![AI Tokens Observability dashboard — dark theme](docs/screenshots/dashboard-dark.png)
 
 ## Installation
 

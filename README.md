@@ -66,6 +66,8 @@ under a second; live updates are near-free.
 
 ## Installation
 
+> 🇹🇭 ผู้ใช้ภาษาไทย: ดู [คู่มือติดตั้งภาษาไทย](docs/INSTALL.th.md)
+
 **Requirements**
 
 - Python **3.9+** (stdlib only — no `pip install` needed)

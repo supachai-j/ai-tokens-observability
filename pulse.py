@@ -1929,17 +1929,57 @@ def _fs_state():
     return (n, total, newest)
 
 
+# Security: only serve requests whose Host header is a loopback name. This
+# defends against DNS-rebinding, where a malicious web page rebinds its own
+# domain to 127.0.0.1 to read the dashboard's sensitive transcript data through
+# the victim's browser. Browsers keep the ORIGINAL hostname in Host, so a
+# rebind of evil.com -> 127.0.0.1 still arrives as "Host: evil.com" — rejected.
+ALLOWED_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+# Cap concurrent SSE (/events) streams: each holds a server thread in an
+# infinite loop, so an unbounded number would exhaust ThreadingHTTPServer.
+MAX_SSE_CONNECTIONS = 8
+_sse_lock = threading.Lock()
+_sse_active = 0
+
+# Content-Security-Policy for the dashboard document. The page is a single file
+# with inline <script>/<style> (hence 'unsafe-inline') and loads Chart.js from
+# jsdelivr; everything else is same-origin. Blocks arbitrary external origins
+# and framing (clickjacking) as defense-in-depth around the esc() output guard.
+_CSP = ("default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "base-uri 'none'; "
+        "frame-ancestors 'none'")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ai-tokens-observability"
 
     def log_message(self, *args):
         pass
 
+    def _host_ok(self):
+        """True only if the Host header names a loopback address (anti-DNS-rebind)."""
+        host = self.headers.get("Host", "")
+        if not host:
+            return False
+        # Strip the port; handle bracketed IPv6 literals like [::1]:8377.
+        if host.startswith("["):
+            hostname = host[:host.index("]") + 1] if "]" in host else host
+        else:
+            hostname = host.rsplit(":", 1)[0] if ":" in host else host
+        return hostname in ALLOWED_HOSTNAMES
+
     def _send(self, code, ctype, body, extra=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", _CSP)
         if extra:
             for k, v in extra.items():
                 self.send_header(k, v)
@@ -1947,6 +1987,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self._host_ok():
+            self._send(403, "text/plain", b"forbidden: invalid Host header")
+            return
         parsed = urlparse(self.path)
         route = parsed.path
         q = parse_qs(parsed.query)
@@ -1986,28 +2029,38 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps(build_fleet(idx, days)).encode()
             self._send(200, "application/json", body)
         elif route == "/events":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            last_state = None
-            last_beat = 0.0
+            global _sse_active
+            with _sse_lock:
+                if _sse_active >= MAX_SSE_CONNECTIONS:
+                    self._send(503, "text/plain", b"too many live connections")
+                    return
+                _sse_active += 1
             try:
-                while True:
-                    state = _fs_state()
-                    if state != last_state:
-                        last_state = state
-                        idx, _ = refresh_index()
-                        payload = json.dumps(build_summary(idx, project, model, days, source))
-                        self.wfile.write(f"data: {payload}\n\n".encode())
-                        self.wfile.flush()
-                    elif time.time() - last_beat > 15:
-                        self.wfile.write(b": keepalive\n\n")
-                        self.wfile.flush()
-                        last_beat = time.time()
-                    time.sleep(3)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                last_state = None
+                last_beat = 0.0
+                try:
+                    while True:
+                        state = _fs_state()
+                        if state != last_state:
+                            last_state = state
+                            idx, _ = refresh_index()
+                            payload = json.dumps(build_summary(idx, project, model, days, source))
+                            self.wfile.write(f"data: {payload}\n\n".encode())
+                            self.wfile.flush()
+                        elif time.time() - last_beat > 15:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                            last_beat = time.time()
+                        time.sleep(3)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            finally:
+                with _sse_lock:
+                    _sse_active -= 1
         else:
             self._send(404, "text/plain", b"not found")
 

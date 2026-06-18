@@ -1577,6 +1577,45 @@ class TestHttpRoutes(unittest.TestCase):
         data, _ = self._json("/api/summary?days=-5")
         self.assertEqual(data["filter"]["days"], 1)
 
+    # -- F1: Host-header validation (anti-DNS-rebinding) --
+
+    def test_foreign_host_header_rejected(self):
+        """A non-loopback Host header (DNS-rebind) → 403, no data served."""
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/sessions",
+            headers={"Host": "evil.example.com"})
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req)
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_loopback_host_name_allowed(self):
+        """Host: localhost:<port> is a loopback name → request is served."""
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/sessions",
+            headers={"Host": f"localhost:{self.port}"})
+        with urllib.request.urlopen(req) as r:
+            self.assertEqual(r.status, 200)
+
+    # -- F2: security headers --
+
+    def test_security_headers_present(self):
+        """Every response carries nosniff + a CSP that allows the Chart.js CDN."""
+        with self._get("/") as r:
+            self.assertEqual(r.headers.get("X-Content-Type-Options"), "nosniff")
+            csp = r.headers.get("Content-Security-Policy", "")
+        self.assertIn("default-src 'self'", csp)
+        self.assertIn("https://cdn.jsdelivr.net", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+
+    # -- F3: SSE connection cap --
+
+    def test_sse_connection_cap_returns_503(self):
+        """With the cap at 0, /events is refused with 503 (never blocks)."""
+        with patch("pulse.MAX_SSE_CONNECTIONS", 0):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                self._get("/events")
+        self.assertEqual(ctx.exception.code, 503)
+
 
 # ---------------------------------------------------------------------------
 # TestReadHistory
